@@ -7,12 +7,14 @@ Run: streamlit run app.py
 """
 
 import html
+import json
 from datetime import date, datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
 from data import fetch_signals
+from person_validation import is_valid_person
 
 # How long a signal counts as "NEW" in the feed (hours)
 NEW_WINDOW_HOURS = 48
@@ -27,20 +29,61 @@ EVENT_TYPE_RANK = {
 }
 
 
-def is_valid_person(name):
-    return (
-        isinstance(name, str)
-        and len(name.split()) >= 2
-        and all(word[0].isupper() for word in name.split() if word)
-        and not any(bad in name for bad in ["City", "County", "Startup", "Company", "News", "Daily"])
-    )
+def _company_name_for_header(row) -> str:
+    """Return company label for headers, or empty when unknown / placeholder."""
+    cn = str(row.get("company_name", "") or "").strip()
+    if not cn or cn.lower() == "unknown":
+        return ""
+    return cn
+
+
+def format_signal_header_line(row) -> str:
+    """
+    Primary one-line signal title for cards and expanders.
+
+    - Valid person: ``Name — EventType @ Company`` (drops ``@ Company`` when company unknown).
+    - Otherwise: ``Executive move @ Company (low confidence)`` or event-only / generic fallback.
+    Never emits blank names; invalid / place-like ``person_name`` values use the low-confidence template.
+    """
+    pn = str(row.get("person_name", "") or "").strip()
+    et = str(row.get("event_type", "") or "").strip() or "Signal"
+    co = _company_name_for_header(row)
+
+    if pn and is_valid_person(pn):
+        if co:
+            return f"{pn} — {et} @ {co}"
+        return f"{pn} — {et}"
+
+    if co:
+        return f"Executive move @ {co} (low confidence)"
+    if et and et != "Signal":
+        return f"Executive move — {et} (low confidence)"
+    return "Executive move (low confidence)"
+
+
+def _format_additional_people(val) -> str:
+    """Pretty list of other people named in the same story (JSON array or empty)."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    if isinstance(val, list):
+        return ", ".join(str(x) for x in val if str(x).strip())
+    s = str(val).strip()
+    if not s or s == "[]":
+        return ""
+    try:
+        names = json.loads(s)
+        if isinstance(names, list) and names:
+            return ", ".join(str(x) for x in names)
+    except (json.JSONDecodeError, TypeError):
+        return s
+    return ""
 
 
 def ensure_required_signal_columns(df: pd.DataFrame) -> None:
     """Guarantee core columns exist so filters and hero sections never KeyError."""
-    for col in ["person_name", "company_name", "role", "event_type", "score"]:
+    for col in ["person_name", "additional_people", "company_name", "role", "event_type", "score"]:
         if col not in df.columns:
-            df[col] = 0 if col == "score" else ""
+            df[col] = 0 if col == "score" else ("[]" if col == "additional_people" else "")
 
 
 def ensure_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
@@ -700,10 +743,14 @@ if search_q:
     rt = (
         filtered.get("raw_title", pd.Series([""] * len(filtered))).fillna("").str.lower()
     )
+    ap = filtered.get("additional_people", pd.Series([""] * len(filtered))).map(
+        lambda x: _format_additional_people(x).lower()
+    )
     mask = (
         pn.str.contains(search_q, regex=False, na=False)
         | cn.str.contains(search_q, regex=False, na=False)
         | rt.str.contains(search_q, regex=False, na=False)
+        | ap.str.contains(search_q, regex=False, na=False)
     )
     filtered = filtered[mask]
 
@@ -773,9 +820,8 @@ with st.container(border=True, key="ws_card_priority"):
         st.info("No **High** priority signals right now (score >= 85). Lower the minimum score filter below or check back after refresh.")
     elif len(top_high) > 0:
         for i, (_, row) in enumerate(top_high.iterrows()):
-            person = row.get("person_name", "") or "-"
-            company = row.get("company_name", "") or "Unknown"
-            pe, ce = html.escape(str(person)), html.escape(str(company))
+            header_line = format_signal_header_line(row)
+            hl = html.escape(header_line)
             out_e = html.escape(str(row.get("outreach_angle", "")))
             new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
             ago = human_time_ago(row.get("detected_at"))
@@ -784,7 +830,7 @@ with st.container(border=True, key="ws_card_priority"):
                 c1, c2 = st.columns([3, 1])
                 with c1:
                     st.markdown(
-                        f"""<p class="ws-card-line"><strong>{pe}</strong> | <em>{ce}</em>{new_html}</p>""",
+                        f"""<p class="ws-card-line"><strong>{hl}</strong>{new_html}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -878,9 +924,8 @@ with st.container(border=True, key="ws_card_week"):
         st.info("No rows to highlight.")
     elif len(top_week) > 0:
         for i, (_, row) in enumerate(top_week.iterrows()):
-            person = row.get("person_name", "") or "-"
-            company = row.get("company_name", "") or "Unknown"
-            pe, ce = html.escape(str(person)), html.escape(str(company))
+            header_line = format_signal_header_line(row)
+            hl = html.escape(header_line)
             out_e = html.escape(str(row.get("outreach_angle", "")))
             new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
             ago = human_time_ago(row.get("detected_at"))
@@ -889,7 +934,7 @@ with st.container(border=True, key="ws_card_week"):
                 c1, c2 = st.columns([3, 1])
                 with c1:
                     st.markdown(
-                        f"""<p class="ws-card-line"><strong>{pe}</strong> | <em>{ce}</em>{new_html}</p>""",
+                        f"""<p class="ws-card-line"><strong>{hl}</strong>{new_html}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -922,6 +967,7 @@ st.markdown("""<hr class="ws-rule"/>""", unsafe_allow_html=True)
 # -----------------------------------------------------------------------------
 table_columns = [
     "person_name",
+    "additional_people",
     "company_name",
     "event_type",
     "raw_title",
@@ -938,6 +984,8 @@ table_columns = [
 
 ensure_columns_present(filtered, table_columns + ["detected_at"])
 display_df = filtered[table_columns].copy()
+if not display_df.empty and "additional_people" in display_df.columns:
+    display_df["additional_people"] = display_df["additional_people"].map(_format_additional_people)
 if not display_df.empty:
     _det = filtered.get("detected_at", pd.Series([pd.NaT] * len(filtered)))
     display_df.insert(0, "Label", _det.apply(lambda x: "NEW" if is_signal_new(x) else ""))
@@ -967,6 +1015,7 @@ else:
         column_config={
             "Label": st.column_config.TextColumn(" ", width="small"),
             "person_name": st.column_config.TextColumn("Person", width="medium"),
+            "additional_people": st.column_config.TextColumn("Also named", width="medium"),
             "company_name": st.column_config.TextColumn("Company", width="medium"),
             "event_type": st.column_config.TextColumn("Event", width="small"),
             "raw_title": st.column_config.TextColumn("Raw title (debug)", width="large"),
@@ -1034,11 +1083,15 @@ with st.container(border=True, key="ws_details_explorer"):
         cn = details_filtered.get("company_name", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
         rt = details_filtered.get("raw_title", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
         rl = details_filtered.get("role", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
+        ap = details_filtered.get("additional_people", pd.Series([""] * len(details_filtered))).map(
+            lambda x: _format_additional_people(x).lower()
+        )
         mask = (
             pn.str.contains(search_lower, na=False, regex=False)
             | cn.str.contains(search_lower, na=False, regex=False)
             | rt.str.contains(search_lower, na=False, regex=False)
             | rl.str.contains(search_lower, na=False, regex=False)
+            | ap.str.contains(search_lower, na=False, regex=False)
         )
         details_filtered = details_filtered[mask]
 
@@ -1051,10 +1104,9 @@ with st.container(border=True, key="ws_details_explorer"):
             st.caption("No rows match these filters. Clear the search or set Priority to All.")
         else:
             for _, row in details_filtered.iterrows():
-                person = row.get("person_name", "") or "-"
-                company = row.get("company_name", "") or "Unknown"
+                also = _format_additional_people(row.get("additional_people"))
                 new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
-                title_plain = f"{person} - {row.get('event_type', '')} @ {company}"
+                title_plain = format_signal_header_line(row)
                 ed = row.get("event_date")
                 if pd.isna(ed):
                     date_str = "-"
@@ -1067,6 +1119,8 @@ with st.container(border=True, key="ws_details_explorer"):
                         f"""<p style="margin:0 0 0.75rem 0;">{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
                         unsafe_allow_html=True,
                     )
+                    if also:
+                        st.caption(f"Also named in story: {also}")
                     st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
                     st.markdown(f"**Priority:** {row.get('priority_level', '')}")
                     st.markdown(f"**Detected:** {det}")

@@ -7,23 +7,38 @@ Uses public RSS feeds only - no LinkedIn or private sources.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import feedparser
 import pandas as pd
 import requests
 
+from ai_extraction import extract_signal_with_ai
+from person_validation import is_valid_person
 from score import apply_scores, compute_signal_score
+
+# When True, ``finalize_dataframe`` emits one row per detected person (shared headline / URL).
+SPLIT_SIGNAL_ROWS_PER_PERSON = False
 
 # -----------------------------------------------------------------------------
 # Column contract: every row returned to the app must have these keys.
 # -----------------------------------------------------------------------------
 REQUIRED_COLUMNS = [
     "person_name",
+    "additional_people",
     "company_name",
+    "industry",
+    "stage",
+    "company_description",
+    "company_location",
+    "funding_amount",
+    "funding_stage",
     "event_type",
     "raw_title",
     "role",
@@ -44,18 +59,20 @@ REQUIRED_COLUMNS = [
 # Public RSS feeds (business / tech news). Swap or extend as needed.
 # -----------------------------------------------------------------------------
 RSS_FEEDS = [
-    # Tech / VC / startups
+    # Core
     "https://techcrunch.com/feed/",
     "https://venturebeat.com/feed/",
-    "https://www.theverge.com/rss/index.xml",
-    "https://www.techmeme.com/feed.xml",
-    # Business & markets
-    "https://feeds.arstechnica.com/arstechnica/business",
-    "https://rss.cnn.com/rss/money_rss.xml",
-    "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
-    # Executive / leadership / funding (Google News search RSS - public HTML)
-    "https://news.google.com/rss/search?q=startup+funding+OR+CEO+appointment&hl=en-US&gl=US&ceid=US:en",
-    "https://news.google.com/rss/search?q=board+of+directors+OR+executive+hire&hl=en-US&gl=US&ceid=US:en",
+    "http://feeds.reuters.com/reuters/businessNews",
+    "http://feeds.reuters.com/reuters/technologyNews",
+    # Finance
+    "https://feeds.bloomberg.com/markets/news.rss",
+    "https://www.ft.com/rss/home",
+    # Exec moves
+    "https://fortune.com/feed/",
+    "https://www.forbes.com/business/feed/",
+    # Extra
+    "https://feeds.marketwatch.com/marketwatch/topstories/",
+    "https://feeds.bbci.co.uk/news/business/rss.xml",
 ]
 
 # Browser-like User-Agent: some feeds block generic Python clients.
@@ -64,7 +81,62 @@ REQUEST_HEADERS = {
     "Accept": "application/rss+xml, application/xml, text/xml, */*",
 }
 
+# Article pages (HTML) — many sites require browser-like Accept.
+HTML_REQUEST_HEADERS = {
+    "User-Agent": "WealthSignalsDashboard/1.0 (+https://example.local; educational project)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
 REQUEST_TIMEOUT_SEC = 20
+# Cap stored combined paragraph text to keep regex/LLM inputs bounded.
+MAX_ARTICLE_TEXT_CHARS = 200_000
+
+
+def fetch_article_paragraph_text(url: str) -> str:
+    """
+    Fetch ``url`` and return all ``<p>`` paragraph text joined with spaces.
+
+    On network/parse errors or non-HTML, returns ``""`` so callers can fall back to the RSS title.
+    """
+    if not url or not str(url).strip():
+        return ""
+    try:
+        resp = requests.get(
+            str(url).strip(),
+            headers=HTML_REQUEST_HEADERS,
+            timeout=REQUEST_TIMEOUT_SEC,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+    except (requests.RequestException, OSError, ValueError):
+        return ""
+
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return ""
+
+    try:
+        soup = BeautifulSoup(resp.content, "html.parser")
+        paragraphs = soup.find_all("p")
+        parts = [p.get_text(separator=" ", strip=True) for p in paragraphs]
+        parts = [p for p in parts if p]
+        full_text = " ".join(parts)
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+    if len(full_text) > MAX_ARTICLE_TEXT_CHARS:
+        full_text = full_text[:MAX_ARTICLE_TEXT_CHARS]
+    return full_text
+
+
+def _extraction_text(full_text: str, raw_title: str) -> str:
+    """Prefer article body; fall back to RSS title when fetch failed or no paragraphs."""
+    ft = (full_text or "").strip()
+    if ft:
+        return ft
+    return (raw_title or "").strip()
 
 
 class _OutreachCtx:
@@ -544,7 +616,19 @@ def compute_extraction_quality(row: pd.Series) -> int:
         q += 2
     if len(str(row.get("raw_title", "")).strip()) >= 28:
         q += 1
-    return q
+    ap_raw = row.get("additional_people")
+    extra = False
+    if isinstance(ap_raw, list):
+        extra = len(ap_raw) > 0
+    elif isinstance(ap_raw, str) and ap_raw.strip() not in ("", "[]"):
+        try:
+            parsed = json.loads(ap_raw)
+            extra = isinstance(parsed, list) and len(parsed) > 0
+        except (json.JSONDecodeError, TypeError):
+            extra = True
+    if extra:
+        q += 1
+    return min(8, q)
 
 
 def compute_confidence_score(row: pd.Series) -> int:
@@ -576,18 +660,452 @@ def why_it_matters_for_event_type(event_type: str) -> str:
     return blurbs.get(et, "Public career and finance news may signal changing wealth dynamics.")
 
 
+# Strip trailing headline / filler tokens so "at Acme Corp today" → "Acme Corp"
+_COMPANY_TAIL_STOPWORDS = frozenset(
+    {
+        "today",
+        "yesterday",
+        "tomorrow",
+        "tonight",
+        "happens",
+        "amid",
+        "after",
+        "before",
+        "during",
+        "when",
+        "while",
+        "said",
+        "says",
+        "reports",
+        "according",
+        "this",
+        "that",
+        "these",
+        "those",
+        "here",
+        "there",
+        "just",
+        "only",
+        "also",
+        "still",
+        "now",
+        "new",
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "had",
+        "will",
+        "can",
+        "may",
+        "might",
+        "could",
+        "should",
+        "would",
+        "on",
+        "in",
+        "at",
+        "for",
+        "and",
+        "or",
+        "as",
+        "to",
+        "of",
+        "with",
+        "from",
+        "by",
+    }
+)
+
+
+def _trim_company_phrase_tail(phrase: str) -> str:
+    """Drop trailing stopwords from a captured company phrase."""
+    toks = phrase.split()
+    while len(toks) > 1 and toks[-1].lower().rstrip(",.;:()") in _COMPANY_TAIL_STOPWORDS:
+        toks.pop()
+    return " ".join(toks).strip()
+
+
+# After "at/from/of [Company]", headline often continues with one of these
+_HEADLINE_STOP_AFTER_COMPANY = (
+    r"(?:today|yesterday|tomorrow|tonight|happens|said|says|reports|according|amid|"
+    r"after|before|during|while|when|where|for|and|as|to|on|in|with|from|the|a|an|is|are|"
+    r"was|were|has|have|had|will|can|may|might|could|should|would|just|also|still|new|here|"
+    r"there|this|that|these|those)\b"
+)
+
+
+def _company_from_title_at_from_of(title: str) -> str:
+    """
+    When person_name is missing, try company-like spans after at / from / of.
+    """
+    if not title or not str(title).strip():
+        return ""
+    t = str(title).strip()
+    for kw in ("at", "from", "of"):
+        m = re.search(
+            rf"\s+{kw}\s+(.+?)(?=\s+{_HEADLINE_STOP_AFTER_COMPANY}|$|[,.\)\|;])",
+            t,
+            re.I,
+        )
+        if m:
+            s = _trim_company_phrase_tail(m.group(1).strip())
+            if s and len(s) <= 120 and re.match(r"^[A-Za-z0-9]", s):
+                return s
+    return ""
+
+
+def _company_label_from_url(url: str) -> str:
+    """
+    Human-readable label from source URL hostname (e.g. techcrunch.com -> Techcrunch).
+    """
+    if not url or not str(url).strip():
+        return ""
+    raw = str(url).strip()
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+    try:
+        host = (urlparse(raw).hostname or "").lower()
+    except ValueError:
+        return ""
+    if not host:
+        return ""
+    parts = [p for p in host.split(".") if p]
+    if parts and parts[0] == "www":
+        parts = parts[1:]
+    if not parts:
+        return ""
+    common_tlds = {
+        "com",
+        "org",
+        "net",
+        "io",
+        "co",
+        "gov",
+        "edu",
+        "uk",
+        "us",
+        "au",
+        "de",
+        "fr",
+        "eu",
+        "ca",
+        "in",
+        "jp",
+        "cn",
+        "info",
+        "biz",
+    }
+    if len(parts) >= 3 and parts[-2] == "co" and parts[-1] in ("uk", "au", "jp", "nz", "in"):
+        label = parts[-3]
+    elif len(parts) >= 2 and parts[-1] in common_tlds:
+        label = parts[-2]
+        if label == "co" and len(parts) >= 3:
+            label = parts[-3]
+    else:
+        label = parts[0]
+    label = label.replace("-", " ").strip()
+    if not label:
+        return ""
+    return label[:1].upper() + label[1:].lower()
+
+
+def _title_as_company_anchor(title: str, max_len: int = 56) -> str:
+    """Last-resort company label from headline (trimmed, single line)."""
+    t = re.sub(r"\s+", " ", str(title).strip())
+    if not t:
+        return ""
+    if len(t) > max_len:
+        t = t[: max_len - 1].rstrip() + "…"
+    return t
+
+
+def ensure_signal_anchor(out: pd.DataFrame) -> None:
+    """
+    Ensure each row has at least one meaningful anchor: person_name or company_name.
+
+    When person_name is missing and company is empty or ``Unknown``, try (in order):
+    ``at`` / ``from`` / ``of`` spans in ``raw_title``, then hostname from ``source_url``,
+    then a shortened headline; final fallback ``News source``.
+    """
+    if out.empty:
+        return
+    pn = out["person_name"].fillna("").astype(str).str.strip()
+    cn = out["company_name"].fillna("").astype(str).str.strip()
+    weak = cn.eq("") | cn.str.lower().eq("unknown")
+    need = pn.eq("") & weak
+    if not need.any():
+        return
+    for idx in out.loc[need].index:
+        t = str(out.at[idx, "raw_title"] or "")
+        u = str(out.at[idx, "source_url"] or "")
+        new_c = _company_from_title_at_from_of(t)
+        if not new_c:
+            new_c = _company_label_from_url(u)
+        if not new_c and t:
+            new_c = _title_as_company_anchor(t)
+        if not new_c:
+            new_c = "News source"
+        out.at[idx, "company_name"] = new_c
+
+
+def dedupe_signals_cross_source(out: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop duplicate signals that appear across feeds/sources.
+
+    - Non-empty ``person_name``: key = person_name + company_name + event_type
+    - Empty ``person_name``: key = ``raw_title``; if title is empty, fall back to ``source_url``
+      so unnamed rows without a title do not collapse into one bucket.
+
+    Keeps the row with the highest ``score`` (then ``confidence_score``, then ``event_date``).
+    """
+    if out.empty:
+        return out
+    o = out.copy()
+    pn = o["person_name"].fillna("").astype(str).str.strip()
+    cn = o["company_name"].fillna("").astype(str).str.strip()
+    et = o["event_type"].fillna("").astype(str).str.strip()
+    rt = o["raw_title"].fillna("").astype(str).str.strip()
+    su = o["source_url"].fillna("").astype(str).str.strip()
+
+    named = pn != ""
+    key = pd.Series(index=o.index, dtype=object)
+    key.loc[named] = "n\x01" + pn[named] + "\x01" + cn[named] + "\x01" + et[named]
+    no_name = ~named
+    has_title = no_name & (rt != "")
+    no_title = no_name & (rt == "")
+    key.loc[has_title] = "t\x01" + rt[has_title]
+    key.loc[no_title] = "u\x01" + su[no_title]
+
+    o["_dedupe_key"] = key
+    o = o.sort_values(
+        by=["score", "confidence_score", "event_date"],
+        ascending=[False, False, False],
+        na_position="last",
+    )
+    o = o.drop_duplicates(subset=["_dedupe_key"], keep="first")
+    return o.drop(columns=["_dedupe_key"], errors="ignore").reset_index(drop=True)
+
+
+# --- Mock “Crunchbase-style” profiles (extend or replace with a real API later) ---
+_MOCK_COMPANY_PROFILES: dict[str, dict[str, str]] = {
+    "openai": {
+        "industry": "AI",
+        "stage": "Series D",
+        "description": "AI research and deployment company.",
+        "location": "San Francisco, CA",
+    },
+    "stripe": {
+        "industry": "Fintech",
+        "stage": "Series H",
+        "description": "Payments and financial infrastructure.",
+        "location": "San Francisco, CA",
+    },
+    "moderna": {
+        "industry": "Biotech",
+        "stage": "Public",
+        "description": "Biotechnology / mRNA medicines.",
+        "location": "Cambridge, MA",
+    },
+}
+
+
+def _normalize_company_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+
+def _extract_stage_and_industry_from_text(text: str) -> tuple[str, str]:
+    """Best-effort stage / industry from article body when mock data misses."""
+    t = (text or "").lower()
+    stage = ""
+    if re.search(r"\bseries\s+d\b", t):
+        stage = "Series D"
+    elif re.search(r"\bseries\s+c\b", t):
+        stage = "Series C"
+    elif re.search(r"\bseries\s+b\b", t):
+        stage = "Series B"
+    elif re.search(r"\bseries\s+a\b", t):
+        stage = "Series A"
+    elif "seed round" in t or re.search(r"\bseed\s+funding\b", t):
+        stage = "Seed"
+
+    industry = ""
+    if re.search(r"\b(ai|artificial intelligence|machine learning)\b", t):
+        industry = "AI"
+    elif "fintech" in t or "financial technology" in t:
+        industry = "Fintech"
+    elif "biotech" in t or "biopharma" in t or "life sciences" in t:
+        industry = "Biotech"
+    return stage, industry
+
+
+def enrich_company_data(company_name: str, article_text: str = "") -> dict[str, str]:
+    """
+    Enrich a company with industry, funding stage, description, and optional location.
+
+    Tries a small mock lookup (Crunchbase-style), then fills gaps from ``article_text``.
+    Never raises; returns empty strings when nothing is found.
+    """
+    out: dict[str, str] = {"industry": "", "stage": "", "description": "", "location": ""}
+    try:
+        cn = (company_name or "").strip()
+        if not cn or cn.lower() == "unknown":
+            return out
+
+        norm = _normalize_company_key(cn)
+        for key, profile in _MOCK_COMPANY_PROFILES.items():
+            kn = _normalize_company_key(key)
+            if norm == kn or kn in norm or norm in kn:
+                for k in out:
+                    if profile.get(k):
+                        out[k] = str(profile[k]).strip()
+                break
+
+        st, ind = _extract_stage_and_industry_from_text(article_text)
+        if not out["stage"] and st:
+            out["stage"] = st
+        if not out["industry"] and ind:
+            out["industry"] = ind
+
+        if not out["description"] and article_text:
+            snippet = " ".join(article_text.split())
+            if len(snippet) > 280:
+                snippet = snippet[:279].rstrip() + "…"
+            if snippet:
+                out["description"] = snippet
+
+        return out
+    except Exception:
+        return {"industry": "", "stage": "", "description": "", "location": ""}
+
+
+def _enrichment_score_bonus(stage: str, industry: str) -> int:
+    """Extra score points from structured company enrichment; combined with base score (clip 0–100)."""
+    bonus = 0
+    st = (stage or "").strip()
+    if any(x in st for x in ("Series B", "Series C", "Series D")):
+        bonus += 20
+    ind = (industry or "").strip()
+    if any(seg in ind for seg in ("AI", "Biotech", "Fintech")):
+        bonus += 15
+    return bonus
+
+
+# --- Funding / deal extraction from article text (dollar amounts + round labels) ---
+# Baseline pattern \$[0-9]+(M|B)? plus commas/decimals and optional K.
+_FUNDING_DOLLAR_RE = re.compile(r"\$[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?\s*[KkMmBb]?", re.I)
+_FUNDING_DOLLAR_COMPACT = re.compile(r"\$[0-9]+[MmBb]?", re.I)
+
+
+def _parse_single_funding_token_to_usd(token: str) -> float | None:
+    """Parse a single amount like ``$120M``, ``$1.5B``, ``$500K``, or plain ``$50000000`` USD."""
+    s = (token or "").strip().replace(",", "")
+    m = re.match(r"^\$\s*([0-9]+(?:\.[0-9]+)?)\s*([KkMmBb])?\s*$", s)
+    if not m:
+        return None
+    try:
+        n = float(m.group(1))
+    except ValueError:
+        return None
+    suf = (m.group(2) or "").upper()
+    mult = 1.0
+    if suf == "K":
+        mult = 1_000
+    elif suf == "M":
+        mult = 1_000_000
+    elif suf == "B":
+        mult = 1_000_000_000
+    return n * mult
+
+
+def _extract_largest_funding_amount_string(text: str) -> str:
+    """
+    Find dollar amounts matching ``\\$[0-9]+...`` with optional ``M``/``B``/``K`` suffixes.
+    Return the token with the largest USD value.
+    """
+    if not (text or "").strip():
+        return ""
+    best_val = -1.0
+    best_raw = ""
+    for pat in (_FUNDING_DOLLAR_RE, _FUNDING_DOLLAR_COMPACT):
+        for m in pat.finditer(text):
+            raw = m.group(0).strip()
+            v = _parse_single_funding_token_to_usd(raw)
+            if v is not None and v > best_val:
+                best_val = v
+                best_raw = raw
+    return best_raw
+
+
+def _extract_funding_stage_from_article(text: str) -> str:
+    """Seed / Series A–C only (explicit round phrasing)."""
+    t = text or ""
+    if re.search(r"\bseries\s+c\b", t, re.I):
+        return "Series C"
+    if re.search(r"\bseries\s+b\b", t, re.I):
+        return "Series B"
+    if re.search(r"\bseries\s+a\b", t, re.I):
+        return "Series A"
+    if re.search(r"\bseed\b", t, re.I):
+        return "Seed"
+    return ""
+
+
+def extract_funding_fields_from_text(text: str) -> dict[str, str]:
+    """
+    Extract ``funding_amount`` (largest ``$…`` token in text) and ``funding_stage`` (Seed / Series A–C).
+
+    Safe on empty input; never raises.
+    """
+    try:
+        blob = (text or "").strip()
+        return {
+            "funding_amount": _extract_largest_funding_amount_string(blob),
+            "funding_stage": _extract_funding_stage_from_article(blob),
+        }
+    except Exception:
+        return {"funding_amount": "", "funding_stage": ""}
+
+
+def _funding_deal_score_bonus(funding_amount_str: str) -> int:
+    """+30 for $100M+ deals, +20 for $10M+ (from parsed article amount)."""
+    v = _parse_single_funding_token_to_usd((funding_amount_str or "").strip())
+    if v is None:
+        return 0
+    if v >= 100_000_000:
+        return 30
+    if v >= 10_000_000:
+        return 20
+    return 0
+
+
 def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize a signals table so the UI always gets safe, consistent data.
 
     - Ensures all REQUIRED_COLUMNS exist
-    - Fills missing text fields; company_name defaults to 'Unknown'
+    - Coerces ``additional_people`` to a list, promotes extras to ``person_name`` when needed,
+      optionally splits one RSS row into several rows (``SPLIT_SIGNAL_ROWS_PER_PERSON``)
+    - Fills missing text fields; company_name defaults to 'Unknown' (with anchor fallbacks when
+      person_name is missing — at/from/of in title, then URL domain, then headline snippet)
+    - Serializes ``additional_people`` to a JSON array string for the UI
     - Parses event_date to datetime (invalid -> NaT)
     - Sets detected_at (when the row was ingested); missing values become “now”
     - Fills empty why_it_matters using why_it_matters_for_event_type
-    - Re-applies scores from score.py (single source of truth)
+    - Re-applies scores from score.py, then adds enrichment bonuses (company stage / industry,
+      funding deal size from ``funding_amount``)
+    - Enriches ``industry``, ``stage``, ``company_description``, ``company_location`` via
+      ``enrich_company_data`` (mock + article fallback)
+    - Sets ``funding_amount`` / ``funding_stage`` from article text via ``extract_funding_fields_from_text``
     - Fills outreach_angle, priority_level, suggested_next_step (action layer)
     - Recomputes quality_score (0-8) and confidence_score (0-100) from final fields
+    - Dedupes across sources by person+company+event (or by raw_title when person is missing),
+      keeping the highest score
     - Drops duplicate source_url rows, keeping the highest confidence / score first
     """
     if df is None or df.empty:
@@ -599,15 +1117,49 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         if col not in out.columns:
             out[col] = pd.NA
 
+    # --- Multiple people: list form, promote primary, optional one-row-per-person ---
+    if not out.empty:
+        out["additional_people"] = out["additional_people"].apply(coerce_additional_people_list)
+        normalize_primary_and_additional_people(out)
+        out = expand_dataframe_rows_per_person(out)
+
     # --- Strings: never NaN in the UI; trim whitespace ---
     for col in ("person_name", "role", "source_url", "full_explanation", "raw_title"):
         out[col] = out[col].fillna("").astype(str).str.strip()
 
     out["company_name"] = out["company_name"].fillna("").astype(str).str.strip()
+    if not out.empty:
+        ensure_signal_anchor(out)
     out.loc[out["company_name"] == "", "company_name"] = "Unknown"
 
     out["event_type"] = out["event_type"].fillna("").astype(str).str.strip()
     out["why_it_matters"] = out["why_it_matters"].fillna("").astype(str).str.strip()
+
+    # --- Company enrichment (mock lookup + article fallback; failures are no-ops) ---
+    if not out.empty:
+        for idx in out.index:
+            try:
+                blob = f"{out.at[idx, 'raw_title']} {out.at[idx, 'full_explanation']}"
+                en = enrich_company_data(str(out.at[idx, 'company_name'] or ''), blob)
+                out.at[idx, "industry"] = (en.get("industry") or "").strip()
+                out.at[idx, "stage"] = (en.get("stage") or "").strip()
+                out.at[idx, "company_description"] = (en.get("description") or "").strip()
+                out.at[idx, "company_location"] = (en.get("location") or "").strip()
+                fd = extract_funding_fields_from_text(blob)
+                out.at[idx, "funding_amount"] = (fd.get("funding_amount") or "").strip()
+                out.at[idx, "funding_stage"] = (fd.get("funding_stage") or "").strip()
+            except Exception:
+                pass
+        for col in (
+            "industry",
+            "stage",
+            "company_description",
+            "company_location",
+            "funding_amount",
+            "funding_stage",
+        ):
+            if col in out.columns:
+                out[col] = out[col].fillna("").astype(str).str.strip()
 
     # Fill why_it_matters when missing
     missing_blurb = out["why_it_matters"] == ""
@@ -619,7 +1171,12 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # --- Freshness: when this row entered our pipeline (for “live feed” UI) ---
     out["detected_at"] = pd.to_datetime(out["detected_at"], errors="coerce", utc=True)
     missing_detected = out["detected_at"].isna()
-    out.loc[missing_detected, "detected_at"] = pd.Timestamp.now(tz=timezone.utc)
+    _now = pd.Timestamp.now(tz=timezone.utc)
+    try:
+        _now = _now.as_unit("s")
+    except (AttributeError, ValueError):
+        pass
+    out.loc[missing_detected, "detected_at"] = _now
 
     # --- Scores always follow score.py rules for the current event_type ---
     out["score"] = out.apply(
@@ -631,6 +1188,19 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         ),
         axis=1,
     )
+    if not out.empty:
+        out["score"] = out["score"] + out.apply(
+            lambda row: _enrichment_score_bonus(
+                str(row.get("stage", "")),
+                str(row.get("industry", "")),
+            ),
+            axis=1,
+        )
+        out["score"] = out["score"] + out.apply(
+            lambda row: _funding_deal_score_bonus(str(row.get("funding_amount", ""))),
+            axis=1,
+        )
+        out["score"] = out["score"].clip(0, 100).astype(int)
 
     # --- Action layer: who to prioritize and what to say (derived from score + event_type) ---
     out["outreach_angle"] = out.apply(generate_outreach_angle, axis=1)
@@ -645,6 +1215,10 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         out["quality_score"] = out.apply(compute_extraction_quality, axis=1).astype(int)
         out["confidence_score"] = out.apply(compute_confidence_score, axis=1).astype(int)
 
+    # --- Dedupe across sources (same person/event or same headline without a person) ---
+    if not out.empty:
+        out = dedupe_signals_cross_source(out)
+
     # --- Dedupe URLs: keep strongest row per URL ---
     if not out.empty and "source_url" in out.columns:
         out = out.sort_values(
@@ -653,9 +1227,18 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             na_position="last",
         )
         before = len(out)
-        out = out.drop_duplicates(subset=["source_url"], keep="first")
+        if SPLIT_SIGNAL_ROWS_PER_PERSON:
+            out = out.drop_duplicates(subset=["source_url", "person_name"], keep="first")
+        else:
+            out = out.drop_duplicates(subset=["source_url"], keep="first")
         if before != len(out):
             pass  # duplicates removed quietly; app does not need to know
+
+    # --- Serialize additional_people (list in memory → JSON for stable column dtype) ---
+    if not out.empty and "additional_people" in out.columns:
+        out["additional_people"] = out["additional_people"].apply(
+            lambda x: json.dumps(coerce_additional_people_list(x))
+        )
 
     return out[REQUIRED_COLUMNS].reset_index(drop=True)
 
@@ -920,27 +1503,62 @@ _BLOCKED_NAME_PHRASES = frozenset(
     }
 )
 
+# Second word looks like a company suffix, not a surname (e.g. "Pinwheel Labs")
+_COMPANY_LIKE_NAME_SECONDS = frozenset(
+    {
+        "labs",
+        "inc",
+        "corp",
+        "llc",
+        "ltd",
+        "plc",
+        "group",
+        "holdings",
+        "partners",
+        "capital",
+        "ventures",
+        "networks",
+        "systems",
+        "solutions",
+        "technologies",
+        "analytics",
+        "robotics",
+        "health",
+        "bank",
+        "security",
+        "retail",
+        "grid",
+        "wire",
+        "global",
+        "international",
+        "media",
+    }
+)
 
-def _guess_person_name(title: str) -> str:
+
+def _guess_all_person_names(title: str) -> tuple[str, list[str]]:
     """
-    Extract "Firstname Lastname" only when the headline supports it.
+    Extract every plausible "Firstname Lastname" span the headline supports.
 
-    Rules: two Title Case words (not ALL CAPS), not city/company noise, and a
-    career keyword (appointed, joins, named, promoted, CEO, founder, …) near the span.
-    Otherwise return "" (do not invent names).
+    Returns (primary_name, additional_names). Primary is the first valid match; the rest
+    are ordered, de-duplicated (case-insensitive). Empty title → ("", []).
     """
     if not title or not str(title).strip():
-        return ""
+        return "", []
 
     t = str(title).strip()
     letters = [c for c in t if c.isalpha()]
     if letters and sum(1 for c in letters if c.isupper()) / len(letters) > 0.72:
-        return ""
+        return "", []
 
+    names: list[str] = []
+    seen: set[str] = set()
     for m in _PERSON_NAME_PAIR.finditer(t):
         first, last = m.group(1), m.group(2)
         a, b = first.lower(), last.lower()
         if a in _BLOCKED_NAME_TOKENS or b in _BLOCKED_NAME_TOKENS:
+            continue
+        if b in _COMPANY_LIKE_NAME_SECONDS:
             continue
         if f"{a} {b}" in _BLOCKED_NAME_PHRASES:
             continue
@@ -952,9 +1570,95 @@ def _guess_person_name(title: str) -> str:
         if not _NAME_CONTEXT_KEYWORDS.search(window):
             continue
 
-        return f"{first} {last}"
+        full = f"{first} {last}"
+        key = full.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(full)
 
-    return ""
+    if not names:
+        return "", []
+    return names[0], names[1:]
+
+
+def _guess_person_name(title: str) -> str:
+    """Backward-compatible: first detected name only."""
+    primary, _ = _guess_all_person_names(title)
+    return primary
+
+
+def coerce_additional_people_list(val: Any) -> list[str]:
+    """Normalize ``additional_people`` from list, JSON string, or missing → list of non-empty strings."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return []
+    if isinstance(val, list):
+        return [str(x).strip() for x in val if str(x).strip()]
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s == "[]":
+            return []
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()]
+            except json.JSONDecodeError:
+                return []
+        return []
+    return []
+
+
+def normalize_primary_and_additional_people(df: pd.DataFrame) -> None:
+    """
+    If ``person_name`` is empty but ``additional_people`` has values, promote the first
+    extra name to ``person_name`` so the row always follows primary + extras semantics.
+    Mutates ``df`` in place (list values in ``additional_people``).
+    """
+    if df.empty or "additional_people" not in df.columns:
+        return
+    for idx in df.index:
+        pn = str(df.at[idx, "person_name"] or "").strip() if "person_name" in df.columns else ""
+        ap = coerce_additional_people_list(df.at[idx, "additional_people"])
+        if not pn and ap:
+            df.at[idx, "person_name"] = ap[0]
+            df.at[idx, "additional_people"] = ap[1:]
+
+
+def expand_dataframe_rows_per_person(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Optionally duplicate rows so each detected person gets its own row (same story metadata).
+
+    ``person_name`` becomes that person; ``additional_people`` lists every other name (JSON
+    list string applied later in finalize).
+    """
+    if df.empty or not SPLIT_SIGNAL_ROWS_PER_PERSON:
+        return df
+    out_rows: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        pn = str(row.get("person_name") or "").strip()
+        ap = coerce_additional_people_list(row.get("additional_people"))
+        ordered: list[str] = []
+        seen: set[str] = set()
+        if pn:
+            kl = pn.lower()
+            if kl not in seen:
+                seen.add(kl)
+                ordered.append(pn)
+        for n in ap:
+            kl = n.lower()
+            if kl not in seen:
+                seen.add(kl)
+                ordered.append(n)
+        if len(ordered) <= 1:
+            out_rows.append(row.to_dict())
+            continue
+        for name in ordered:
+            d = row.to_dict()
+            d["person_name"] = name
+            d["additional_people"] = [x for x in ordered if x != name]
+            out_rows.append(d)
+    return pd.DataFrame(out_rows).reset_index(drop=True)
 
 
 def _guess_company_name(title: str) -> str:
@@ -976,6 +1680,11 @@ def _guess_company_name(title: str) -> str:
 
     # "... at CompanyName ..."
     m = re.search(r"\s+at\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
+    if m:
+        return m.group(1).strip()
+
+    # "... from CompanyName ..."
+    m = re.search(r"\s+from\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
     if m:
         return m.group(1).strip()
 
@@ -1026,6 +1735,56 @@ def _guess_role(title: str) -> str:
     return ""
 
 
+def _person_name_fails_validation(person: str) -> bool:
+    """True when regex gave no name or a name that fails ``is_valid_person`` (needs AI fallback)."""
+    p = str(person or "").strip()
+    return not p or not is_valid_person(p)
+
+
+def _ai_extraction_enabled() -> bool:
+    return os.environ.get("WEALTH_SIGNALS_AI_EXTRACTION", "1").lower() not in ("0", "false", "no")
+
+
+def _merge_ai_extraction_for_row(
+    title: str,
+    article_text: str,
+    summary: str,
+    person: str,
+    extra_people: list[str],
+    company: str,
+    role: str,
+    event_type: str,
+) -> tuple[str, list[str], str, str, str]:
+    """
+    Hybrid extraction: regex/heuristics first; if ``person_name`` fails validation, call AI
+    and **replace** ``person_name``, ``company_name``, ``role``, and ``event_type`` with the
+    model output (``additional_people`` cleared when AI runs). If the API returns nothing
+    useful, keep regex fields unchanged.
+    """
+    if not _ai_extraction_enabled() or not os.environ.get("OPENAI_API_KEY", "").strip():
+        return person, extra_people, company, role, event_type
+    if not _person_name_fails_validation(person):
+        return person, extra_people, company, role, event_type
+    # Prefer article body first so downstream truncation keeps real paragraphs over the title.
+    chunks = [article_text, title, summary]
+    combined = "\n\n".join(c for c in chunks if (c or "").strip()).strip()
+    if not combined:
+        combined = title
+    parsed = extract_signal_with_ai(combined)
+    if not parsed:
+        return person, extra_people, company, role, event_type
+
+    # Full overwrite from AI for structured fields (regex extras dropped — single AI snapshot)
+    person = str(parsed.get("person_name", "") or "").strip()
+    extra_people = []
+    company = str(parsed.get("company_name", "") or "").strip()
+    role = str(parsed.get("role", "") or "").strip()
+    et_ai = str(parsed.get("event_type", "") or "").strip()
+    if et_ai:
+        event_type = et_ai
+    return person, extra_people, company, role, event_type
+
+
 def _fetch_one_feed(url: str) -> list[Any]:
     """Download and parse a single RSS URL; returns entries or []."""
     try:
@@ -1042,8 +1801,8 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
     """
     Turn RSS entries into row dicts.
 
-    Keeps items that classify to a core type or 'Other'. Missing person_name / role
-    does not drop a row - those fields may stay empty.
+    Pipeline per row: fetch article HTML and join ``<p>`` text when possible; run classification
+    and regex on that body (fallback: RSS title). Then AI if ``person_name`` invalid; build row.
     """
     rows: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -1051,10 +1810,6 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
     for entry in entries:
         title = (getattr(entry, "title", None) or "").strip()
         if not title:
-            continue
-
-        event_type = _classify_event_type(title)
-        if not event_type:
             continue
 
         link = (getattr(entry, "link", None) or "").strip()
@@ -1067,20 +1822,35 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         summary = _strip_html(getattr(entry, "summary", None) or getattr(entry, "description", None) or "")
         full_explanation = summary or f"(No summary in feed.) Headline: {title}"
 
-        person = _guess_person_name(title)
-        company = _guess_company_name(title)
-        role = _guess_role(title)
+        article_paragraphs = fetch_article_paragraph_text(link)
+        extraction_text = _extraction_text(article_paragraphs, title)
+
+        event_type = _classify_event_type(extraction_text)
+        if not event_type:
+            continue
+
+        # 1) Fast regex / heuristics on article body (or title if fetch failed)
+        person, extra_people = _guess_all_person_names(extraction_text)
+        company = _guess_company_name(extraction_text)
+        role = _guess_role(extraction_text)
+
+        # 2) If person_name missing or invalid → AI fallback; 3) overwrite with AI output when used
+        person, extra_people, company, role, event_type = _merge_ai_extraction_for_row(
+            title, article_paragraphs, summary, person, extra_people, company, role, event_type
+        )
+        why = why_it_matters_for_event_type(event_type)
 
         rows.append(
             {
                 "person_name": person,
+                "additional_people": extra_people,
                 "company_name": company,
                 "event_type": event_type,
                 "raw_title": title,
                 "role": role,
                 "event_date": _parse_entry_date(entry),
                 "detected_at": datetime.now(timezone.utc),
-                "why_it_matters": why_it_matters_for_event_type(event_type),
+                "why_it_matters": why,
                 "source_url": link,
                 "full_explanation": full_explanation[:4000],
                 "quality_score": 0,
@@ -1099,6 +1869,7 @@ def _raw_sample_signals() -> list[dict]:
     return [
         {
             "person_name": "Alex Rivera",
+            "additional_people": [],
             "company_name": "Northbeam Analytics",
             "event_type": "Founder Exit",
             "raw_title": "Northbeam Analytics acquired in nine-figure strategic exit - Alex Rivera, Co-founder & CEO",
@@ -1115,6 +1886,7 @@ def _raw_sample_signals() -> list[dict]:
         },
         {
             "person_name": "Jordan Lee",
+            "additional_people": [],
             "company_name": "Helio Robotics",
             "event_type": "Funding",
             "raw_title": "Helio Robotics raises $120M Series B led by top-tier VCs",
@@ -1130,6 +1902,7 @@ def _raw_sample_signals() -> list[dict]:
         },
         {
             "person_name": "Sam Patel",
+            "additional_people": [],
             "company_name": "Crescent Health",
             "event_type": "Promotion",
             "raw_title": "Crescent Health names Sam Patel SVP of Product in executive promotion",
@@ -1145,6 +1918,7 @@ def _raw_sample_signals() -> list[dict]:
         },
         {
             "person_name": "Taylor Kim",
+            "additional_people": [],
             "company_name": "Meridian Bank",
             "event_type": "Board Appointment",
             "raw_title": "Meridian Bank adds Taylor Kim as independent director to board",
@@ -1160,6 +1934,7 @@ def _raw_sample_signals() -> list[dict]:
         },
         {
             "person_name": "Morgan Chen",
+            "additional_people": [],
             "company_name": "Lumen Grid",
             "event_type": "Founder Exit",
             "raw_title": "Lumen Grid founder Morgan Chen exits after strategic acquisition",
@@ -1175,6 +1950,7 @@ def _raw_sample_signals() -> list[dict]:
         },
         {
             "person_name": "Riley Brooks",
+            "additional_people": [],
             "company_name": "Atlas Security",
             "event_type": "Funding",
             "raw_title": "Atlas Security closes $85M funding round to scale enterprise sales",
@@ -1190,6 +1966,7 @@ def _raw_sample_signals() -> list[dict]:
         },
         {
             "person_name": "Casey Nguyen",
+            "additional_people": [],
             "company_name": "Harbor Freight AI",
             "event_type": "Promotion",
             "raw_title": "Harbor Freight AI promotes Casey Nguyen to VP of Engineering",
@@ -1204,6 +1981,7 @@ def _raw_sample_signals() -> list[dict]:
         },
         {
             "person_name": "Jamie Foster",
+            "additional_people": [],
             "company_name": "Silverline Retail",
             "event_type": "Board Appointment",
             "raw_title": "Silverline Retail appoints investor board observer Jamie Foster",
@@ -1213,6 +1991,24 @@ def _raw_sample_signals() -> list[dict]:
             "source_url": "https://www.ft.com/",
             "full_explanation": (
                 "Board-related news can appear in specialty press or company blogs; always verify on primary sources."
+            ),
+            "quality_score": 4,
+        },
+        {
+            "person_name": "Avery Smith",
+            "additional_people": ["Blake Jones"],
+            "company_name": "Pinwheel Labs",
+            "event_type": "Board Appointment",
+            "raw_title": (
+                "Pinwheel Labs appoints co-founders Avery Smith and Blake Jones as board observers "
+                "after Series B"
+            ),
+            "role": "Board Observer",
+            "event_date": "2026-03-22",
+            "why_it_matters": "Multiple named leaders in one story can mean several outreach threads from a single item.",
+            "source_url": "https://www.pinwheel-labs.example/press/board-observers",
+            "full_explanation": (
+                "When several executives are named, capture each as a separate contact angle or split rows per person."
             ),
             "quality_score": 4,
         },
