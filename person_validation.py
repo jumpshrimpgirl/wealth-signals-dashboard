@@ -7,7 +7,57 @@ Kept in one module so ``data`` and ``app`` can import without circular dependenc
 from __future__ import annotations
 
 import json
+import os
 import re
+from typing import Any
+
+import requests
+
+# --- Wikipedia (shared search for entity / alive checks; no API key) -----------------
+
+_WIKI_API = "https://en.wikipedia.org/w/api.php"
+_WIKI_TIMEOUT = float(os.environ.get("WEALTH_SIGNALS_WIKI_TIMEOUT", "4.0"))
+_WIKI_SESSION = requests.Session()
+_WIKI_SESSION.headers.update(
+    {"User-Agent": "WealthSignalsDashboard/1.0 (entity-validation; educational)"}
+)
+
+# Hard rejection: substring in *name* (case-insensitive) — orgs / regions / generic labels, not people
+ENTITY_INVALID_NAME_SUBSTRINGS = frozenset(
+    {
+        "department",
+        "agency",
+        "ministry",
+        "government",
+        "region",
+        "middle east",
+        "technology",
+        "business",
+        "company",
+        "committee",
+        "corporation",
+        "association",
+        "foundation",
+        "administration",
+        "parliament",
+        "congress",
+    }
+)
+
+COMMON_NOUNS_ENTITY = frozenset(
+    {
+        "business",
+        "technology",
+        "region",
+        "department",
+        "company",
+        "committee",
+        "government",
+        "economy",
+        "market",
+        "industry",
+    }
+)
 
 # Any token (case-insensitive) → reject (places, media, org cues, etc.)
 PERSON_NAME_WORD_BLACKLIST = frozenset(
@@ -208,6 +258,131 @@ def is_valid_person(name: str) -> bool:
         if len(w) > 40:
             return False
 
+    return True
+
+
+def is_valid_person_entity(name: str, context: str = "") -> bool:
+    """
+    Critical entity-type gate: reject obvious non-person strings (orgs, regions, generic labels).
+
+    ``context`` is reserved for future use (e.g. headline proximity); hard rules apply to ``name``.
+    After substring and noun checks, defers to :func:`is_valid_person` for shape/tokens.
+    """
+    del context  # explicit: do not reject valid people because article mentions "Department" elsewhere
+    n = (name or "").strip()
+    if not n:
+        return False
+    low = n.lower()
+    for pat in ENTITY_INVALID_NAME_SUBSTRINGS:
+        if pat in low:
+            return False
+    words = n.split()
+    if len(words) < 2:
+        return False
+    if all(w.lower() in COMMON_NOUNS_ENTITY for w in words):
+        return False
+    return is_valid_person(n)
+
+
+def enrich_with_search(name: str) -> dict[str, Any]:
+    """
+    Lightweight Wikipedia search + intro text (public API). Used as ``enrich_with_search`` for
+    alive/deceased heuristics — not a general web search.
+
+    Returns keys: ``found``, ``title``, ``extract``, ``snippet`` (short intro for snippet-style checks).
+    """
+    empty: dict[str, Any] = {"found": False, "title": "", "extract": "", "snippet": ""}
+    q = (name or "").strip()
+    if len(q) < 3:
+        return empty
+    try:
+        r = _WIKI_SESSION.get(
+            _WIKI_API,
+            params={
+                "action": "query",
+                "list": "search",
+                "srsearch": q,
+                "srlimit": 3,
+                "format": "json",
+            },
+            timeout=_WIKI_TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except (requests.RequestException, OSError, ValueError, KeyError):
+        return empty
+    hits = (data.get("query") or {}).get("search") or []
+    if not hits:
+        return empty
+    title = str(hits[0].get("title") or "").strip()
+    if not title:
+        return empty
+    try:
+        r2 = _WIKI_SESSION.get(
+            _WIKI_API,
+            params={
+                "action": "query",
+                "prop": "extracts",
+                "titles": title,
+                "exintro": 1,
+                "explaintext": 1,
+                "format": "json",
+            },
+            timeout=_WIKI_TIMEOUT,
+        )
+        r2.raise_for_status()
+        pages = ((r2.json().get("query") or {}).get("pages")) or {}
+        page = next(iter(pages.values()), {})
+        extract = str(page.get("extract") or "")
+    except (requests.RequestException, OSError, ValueError, KeyError):
+        extract = ""
+
+    excerpt = (extract or "").strip()
+    snip = excerpt[:500] if excerpt else ""
+    return {
+        "found": True,
+        "title": title,
+        "extract": excerpt,
+        "snippet": snip,
+    }
+
+
+def is_likely_alive(name: str, search_data: dict[str, Any] | None = None) -> bool:
+    """
+    Heuristic: if Wikipedia-style intro clearly indicates a deceased/historical bio, return False.
+    If no search data, do not block (unknown). If ``search_data`` is provided, avoids a second HTTP call.
+    """
+    data = search_data if search_data is not None else enrich_with_search(name)
+    if not data.get("found"):
+        return True
+    snip = (data.get("snippet") or data.get("extract") or "").lower()
+    if "born" in snip and "died" in snip:
+        return False
+    return True
+
+
+INVALID_ROLE_SUBSTRINGS = frozenset(
+    (
+        "journalist",
+        "reporter",
+        "spokesperson",
+        "attorney",
+        "lawyer",
+    )
+)
+
+
+def is_valid_role(role: str | None) -> bool:
+    """
+    Reject roles that are not wealth-prospect-relevant (media, generic legal without firm context).
+    Substring match on lowercase role text.
+    """
+    rl = (role or "").strip()
+    if not rl:
+        return False
+    low = rl.lower()
+    if any(r in low for r in INVALID_ROLE_SUBSTRINGS):
+        return False
     return True
 
 

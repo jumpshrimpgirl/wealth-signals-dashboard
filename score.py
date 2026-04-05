@@ -141,18 +141,32 @@ def apply_scores(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for row in signals:
         row = dict(row)
-        row["score"] = compute_signal_score(
-            str(row.get("event_type", "") or ""),
-            str(row.get("person_name", "") or ""),
-            str(row.get("company_name", "") or ""),
-            str(row.get("role", "") or ""),
-            raw_title=str(row.get("raw_title", "") or ""),
-            full_explanation=str(row.get("full_explanation", "") or ""),
-            funding_amount=str(row.get("funding_amount", "") or ""),
-            funding_stage=str(row.get("funding_stage", "") or ""),
-        )
+        if row.pop("_use_engine_score", False):
+            row["score"] = clamp_score_0_100(int(row.pop("_engine_score", 0) or 0))
+        else:
+            row["score"] = compute_signal_score(
+                str(row.get("event_type", "") or ""),
+                str(row.get("person_name", "") or ""),
+                str(row.get("company_name", "") or ""),
+                str(row.get("role", "") or ""),
+                raw_title=str(row.get("raw_title", "") or ""),
+                full_explanation=str(row.get("full_explanation", "") or ""),
+                funding_amount=str(row.get("funding_amount", "") or ""),
+                funding_stage=str(row.get("funding_stage", "") or ""),
+            )
         out.append(row)
     return out
+
+
+def compute_wealth_prospect_breakdown(
+    *,
+    seniority_pts: int,
+    wealth_pts: int,
+    signal_pts: int,
+    confidence_pts: int,
+) -> int:
+    """Explicit 0–100 model: seniority + wealth likelihood + signal + data confidence (see wealth_prospect_engine)."""
+    return clamp_score_0_100(int(seniority_pts) + int(wealth_pts) + int(signal_pts) + int(confidence_pts))
 
 
 def clamp_score_0_100(score: int | float) -> int:

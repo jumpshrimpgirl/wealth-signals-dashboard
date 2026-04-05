@@ -41,6 +41,7 @@ from score import (
     passes_wealth_high_priority_gate,
     wealth_signal_rank,
 )
+import wealth_prospect_engine as _wealth_engine
 
 # When True, ``finalize_dataframe`` emits one row per detected person (shared headline / URL).
 SPLIT_SIGNAL_ROWS_PER_PERSON = False
@@ -145,6 +146,9 @@ REQUIRED_COLUMNS = [
     "wealth_signal_hint",
     "wealth_signal_raw_hint",
     "ingest_overall_extraction_confidence",
+    "prospect_bio",
+    "engine_pipeline_score",
+    "prospect_label",
 ]
 
 # -----------------------------------------------------------------------------
@@ -942,6 +946,32 @@ def compute_confidence_score(row: pd.Series) -> int:
     _, pattern_raw = structured_pattern_confidence_and_type(blob, legacy_event_type=leg_et)
     merged = legacy + pattern_raw
     return int(max(0, min(100, merged)))
+
+
+def _prospect_label_for_row(row: pd.Series) -> str:
+    """
+    When the engine marks signal_priority HIGH but overall confidence is still low,
+    surface a single UI string (see app Details / Home).
+    """
+    conf = int(pd.to_numeric(row.get("confidence_score"), errors="coerce") or 0)
+    sp = ""
+    ej = str(row.get("extraction_audit_json") or "").strip()
+    if ej:
+        try:
+            audit = json.loads(ej)
+            if isinstance(audit, dict):
+                sp = str(audit.get("signal_priority") or "").strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    if sp == "HIGH" and conf < 40:
+        return "🔥 High Signal / Needs Enrichment"
+    return ""
+
+
+def _apply_prospect_label(out: pd.DataFrame) -> None:
+    if out.empty:
+        return
+    out["prospect_label"] = out.apply(_prospect_label_for_row, axis=1)
 
 
 def why_it_matters_for_event_type(event_type: str) -> str:
@@ -2779,7 +2809,8 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
       company-level funding is copied to sibling rows before scoring so each person inherits the deal;
       ``aggregated_estimated_wealth`` sums per-row deal estimates by person — at **$10M+** marks target client
     - Fills outreach_angle, priority_level, suggested_next_step (action layer)
-    - Recomputes quality_score (0-8) and confidence_score (0-100) from final fields
+    - Recomputes quality_score (0-8) and confidence_score (0-100) from final fields; sets ``prospect_label``
+      when engine ``signal_priority`` is HIGH and confidence_score is below 40
     - Dedupes across sources by person+company+event (or by raw_title when person is missing),
       keeping the highest score
     - Drops duplicate source_url rows, keeping the highest confidence / score first
@@ -2931,8 +2962,16 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         apply_cross_company_enrichment(out)
 
         out["score"] = out["score"].map(clamp_score_0_100).astype(int)
+        if "engine_pipeline_score" in out.columns:
+            eps = pd.to_numeric(out["engine_pipeline_score"], errors="coerce")
+            em = eps.notna()
+            if bool(em.any()):
+                out.loc[em, "score"] = eps[em].clip(0, 100).astype(int)
 
         weak = out["weak_signal"].fillna(False).astype(bool)
+        if "engine_pipeline_score" in out.columns:
+            eps = pd.to_numeric(out["engine_pipeline_score"], errors="coerce")
+            weak = weak & eps.isna()
         if weak.any():
             out.loc[weak, "event_type"] = "Other"
             _wm_other = why_it_matters_for_event_type("Other")
@@ -2996,6 +3035,7 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if not out.empty:
         out["quality_score"] = out.apply(compute_extraction_quality, axis=1).astype(int)
         out["confidence_score"] = out.apply(compute_confidence_score, axis=1).astype(int)
+        _apply_prospect_label(out)
 
     # --- Dedupe across sources (same person/event or same headline without a person) ---
     if not out.empty:
@@ -3015,10 +3055,8 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         )
         out = out.drop(columns=["_person_id"], errors="ignore")
         before = len(out)
-        if SPLIT_SIGNAL_ROWS_PER_PERSON:
-            out = out.drop_duplicates(subset=["source_url", "person_name"], keep="first")
-        else:
-            out = out.drop_duplicates(subset=["source_url"], keep="first")
+        # One row per (article, person) so multi-prospect engine rows are all kept
+        out = out.drop_duplicates(subset=["source_url", "person_name"], keep="first")
         if before != len(out):
             pass  # duplicates removed quietly; app does not need to know
 
@@ -3697,12 +3735,31 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
 
         legacy_et = _classify_event_type(extraction_text) or "Other"
 
-        # 1) Fast regex / heuristics on article body (or title if fetch failed)
+        entry_date_s = _parse_entry_date(entry)
+        detected_now = datetime.now(timezone.utc)
+
+        # Prospect identification engine (multi-person, validated, 0–100 score) when enabled
+        if _wealth_engine.ingest_via_prospect_engine():
+            eng_rows = _wealth_engine.process_article_to_rows(
+                title=title,
+                summary=summary,
+                article_paragraphs=article_paragraphs or "",
+                full_explanation=full_explanation,
+                link=link,
+                entry_date_iso=entry_date_s,
+                detected_at=detected_now,
+            )
+            if eng_rows:
+                rows.extend(eng_rows)
+                continue
+            if not _wealth_engine.LAST_ENGINE_API_ERROR:
+                continue
+
+        # Legacy: regex + structured AI merge (single primary person per article)
         person, extra_people = _guess_all_person_names(extraction_text)
         company = _guess_company_name(extraction_text)
         role = _guess_role(extraction_text)
 
-        # 2) Structured multi-pass AI (when enabled) merges with regex; 3) sanitize person/role
         person, extra_people, company, role, event_type_merged, client_type_hint, source_of_wealth_hint, ingest_extras = (
             _merge_ai_extraction_for_row(
                 title, article_paragraphs, summary, person, extra_people, company, role, legacy_et
@@ -3731,8 +3788,8 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                 "event_type": event_type,
                 "raw_title": title,
                 "role": role,
-                "event_date": _parse_entry_date(entry),
-                "detected_at": datetime.now(timezone.utc),
+                "event_date": entry_date_s,
+                "detected_at": detected_now,
                 "why_it_matters": why,
                 "source_url": link,
                 "full_explanation": full_explanation[:4000],
@@ -3750,6 +3807,8 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                     "ingest_overall_extraction_confidence", ""
                 )
                 or "",
+                "prospect_bio": "",
+                "engine_pipeline_score": None,
             }
         )
 

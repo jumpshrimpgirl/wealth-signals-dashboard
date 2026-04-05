@@ -17,6 +17,17 @@ import streamlit as st
 
 from data import fetch_signals, format_wealth
 from person_validation import is_valid_person
+from slack_alerts import send_slack_alert
+
+
+def _load_signals_df() -> pd.DataFrame:
+    """Load signals from RSS/sample pipeline and notify Slack for high-priority rows when configured."""
+    df = fetch_signals()
+    try:
+        send_slack_alert(df.to_dict("records"))
+    except Exception:
+        pass
+    return df
 
 # How long a signal counts as "NEW" in the feed (hours)
 NEW_WINDOW_HOURS = 48
@@ -72,6 +83,9 @@ SEARCHABLE_COLUMNS = (
     "fa_suppression_level",
     "fa_suppression_reason",
     "person_name_validation",
+    "prospect_bio",
+    "engine_pipeline_score",
+    "prospect_label",
 )
 
 # Company field: clear when it looks like a news outlet (substring match on normalized name)
@@ -246,6 +260,10 @@ def prepare_explore_view(df: pd.DataFrame) -> pd.DataFrame:
         out["prospect_quality"] = ""
     else:
         out["prospect_quality"] = out["prospect_quality"].fillna("").astype(str)
+    if "prospect_label" not in out.columns:
+        out["prospect_label"] = ""
+    else:
+        out["prospect_label"] = out["prospect_label"].fillna("").astype(str)
     out["score"] = pd.to_numeric(out["score"], errors="coerce").fillna(0)
     if "wealth_rank" not in out.columns:
         out["wealth_rank"] = 3
@@ -285,7 +303,7 @@ EVENT_TYPE_RANK = {
 def _company_name_for_header(row) -> str:
     """Return company label for headers, or empty when unknown / placeholder."""
     cn = str(row.get("company_name", "") or "").strip()
-    if not cn or cn.lower() == "unknown":
+    if not cn or cn.lower() in ("unknown", "data pending"):
         return ""
     return cn
 
@@ -395,6 +413,8 @@ def ensure_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
             elif col in ("score", "quality_score", "confidence_score", "ai_fa_usefulness_score", "ai_extraction_confidence"):
                 df[col] = 0
             elif col == "ai_rerank_priority":
+                df[col] = pd.NA
+            elif col == "engine_pipeline_score":
                 df[col] = pd.NA
             elif col in ("event_date", "detected_at"):
                 df[col] = pd.NaT
@@ -790,6 +810,19 @@ def inject_styles() -> None:
     margin-left: 0.3rem;
     vertical-align: middle;
   }
+  .ws-enrichment-label {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: #9a3412;
+    background: #ffedd5;
+    border: 1px solid #fb923c;
+    border-radius: 999px;
+    padding: 0.15rem 0.5rem;
+    margin-left: 0.35rem;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
   .ws-score-pill {
     font-family: 'IBM Plex Mono', ui-monospace, monospace;
     font-size: 1.25rem;
@@ -925,6 +958,14 @@ def priority_badge_html(level: str) -> str:
 
 def new_pill_html() -> str:
     return '<span class="ws-pill">NEW</span>'
+
+
+def prospect_label_html(label: str) -> str:
+    """Badge when engine marks HIGH signal priority but confidence is still low."""
+    t = str(label or "").strip()
+    if not t:
+        return ""
+    return f'<span class="ws-enrichment-label">{html.escape(t)}</span>'
 
 
 def safe_href(url: str) -> str:
@@ -1111,7 +1152,7 @@ def render_home_signal_card(row: pd.Series) -> None:
         c1, c2 = st.columns([3, 1])
         with c1:
             st.markdown(
-                f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
+                f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}{prospect_label_html(row.get("prospect_label", ""))}</p>""",
                 unsafe_allow_html=True,
             )
             st.markdown(
@@ -1157,7 +1198,7 @@ inject_styles()
 
 # Session: cached dataframe so "Refresh" can reload without restarting the app
 if "signals_df" not in st.session_state:
-    st.session_state.signals_df = fetch_signals()
+    st.session_state.signals_df = _load_signals_df()
 
 signals_df = st.session_state.signals_df
 ensure_required_signal_columns(signals_df)
@@ -1229,6 +1270,9 @@ ensure_columns_present(
         "wealth_signal_hint",
         "wealth_signal_raw_hint",
         "ingest_overall_extraction_confidence",
+        "prospect_bio",
+        "engine_pipeline_score",
+        "prospect_label",
     ],
 )
 
@@ -1440,6 +1484,9 @@ ensure_columns_present(
         "wealth_signal_hint",
         "wealth_signal_raw_hint",
         "ingest_overall_extraction_confidence",
+        "prospect_bio",
+        "engine_pipeline_score",
+        "prospect_label",
     ],
 )
 
@@ -1525,7 +1572,7 @@ with tab_home:
                 help="Fetch latest RSS / sample data again",
                 key="home_refresh_signals",
             ):
-                st.session_state.signals_df = fetch_signals()
+                st.session_state.signals_df = _load_signals_df()
                 st.rerun()
         st.caption(
             f"Up to **{HOME_TOP_SIGNALS}** prospects from your current sidebar filters. "
@@ -1600,6 +1647,7 @@ with tab_explore:
         "est_wealth_display": "Est. wealth (display)",
         "client_type": "Client type",
         "prospect_quality": "Prospect quality",
+        "prospect_label": "Signal label",
         "ai_fa_usefulness_score": "FA usefulness",
         "ai_summary": "AI summary",
     }
@@ -1612,6 +1660,7 @@ with tab_explore:
         "est_wealth_display",
         "client_type",
         "prospect_quality",
+        "prospect_label",
         "ai_fa_usefulness_score",
         "ai_summary",
     ]
@@ -1681,6 +1730,11 @@ with tab_explore:
                     "Prospect quality",
                     width="small",
                     help="AI tier: Excellent / Possible / Low-value / Not actionable.",
+                ),
+                "Signal label": st.column_config.TextColumn(
+                    "Signal label",
+                    width="medium",
+                    help="High financial signal from the article, but enrichment confidence is still low — follow up manually.",
                 ),
                 "FA usefulness": st.column_config.NumberColumn(
                     "FA usefulness",
@@ -1757,7 +1811,7 @@ with tab_explore:
                     det = human_time_ago(row.get("detected_at"))
                     with st.expander(title_plain):
                         st.markdown(
-                            f"""<p style="margin:0 0 0.75rem 0;">{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
+                            f"""<p style="margin:0 0 0.75rem 0;">{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html} {priority_badge_html(row.get("priority_level", ""))}{prospect_label_html(row.get("prospect_label", ""))}</p>""",
                             unsafe_allow_html=True,
                         )
                         if row.get("is_billionaire"):
@@ -1777,6 +1831,9 @@ with tab_explore:
                             _rn = ""
                         st.markdown(f"**Name:** {_pn_disp}")
                         st.markdown(f"**Role / title:** {_rn if _rn else 'Not identified'}")
+                        _pbio = _cell_str(row.get("prospect_bio"))
+                        if _pbio:
+                            st.markdown(f"**Bio:** {_pbio}")
                         _pval = _cell_str(row.get("person_name_validation"))
                         if _pval and _pval != "ok":
                             st.caption(f"Name validation: {_pval}")

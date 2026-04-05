@@ -123,7 +123,7 @@ STRING fields (use "" only when no defensible anchor exists):
 - source_of_wealth: short phrase; infer likely channel when cues exist (e.g. "likely equity from funding context — inference")
 - why_flagged: one short sentence: why this appeared as a wealth-relevant prospecting lead
 - why_matters_for_advisor: one short sentence: money or relationship value for an FA (not outlet prestige)
-- ai_summary: one sentence opportunity summary for an FA (max ~240 chars)
+- ai_summary: unless the text already has a structured 3-part block, output exactly: (1) Who they are (2) What happened (3) Why it matters financially — each as a short phrase or sentence
 - ai_why_it_matters: 2-3 sentences, money-focused (liquidity, tax, planning)
 - ai_outreach: one respectful first-touch line
 - ai_client_who: "Name — Role" or best available; describe partial identity if that is all the text supports
@@ -443,7 +443,11 @@ def enrich_dataframe_with_ai_decision(df):  # pd.DataFrame
 
         out.at[idx, "ai_extraction_confidence"] = exconf
         out.at[idx, "prospect_quality"] = str(d.get("prospect_quality") or "").strip()
-        out.at[idx, "ai_fa_usefulness_score"] = int(d.get("fa_usefulness_score") or 0)
+        fus = int(d.get("fa_usefulness_score") or 0)
+        base_sc = int(pd.to_numeric(out.at[idx, "score"], errors="coerce") or 0)
+        if fus < 12 and base_sc >= 35:
+            fus = min(100, max(fus, int(round(base_sc * 0.94))))
+        out.at[idx, "ai_fa_usefulness_score"] = fus
         out.at[idx, "ai_why_flagged"] = str(d.get("why_flagged") or "").strip()
         out.at[idx, "ai_why_matters_fa"] = str(d.get("why_matters_for_advisor") or "").strip()
 
@@ -466,9 +470,16 @@ def enrich_dataframe_with_ai_decision(df):  # pd.DataFrame
             except (TypeError, ValueError):
                 pass
 
+        pre_sum = str(out.at[idx, "ai_summary"] or "").strip()
+        engine_row = (
+            "engine_pipeline_score" in out.columns and pd.notna(out.at[idx, "engine_pipeline_score"])
+        )
         for nk in ("ai_summary", "ai_why_it_matters", "ai_outreach", "ai_client_who", "ai_why_money"):
-            if d.get(nk):
-                out.at[idx, nk] = str(d[nk]).strip()
+            if not d.get(nk):
+                continue
+            if nk == "ai_summary" and pre_sum and engine_row and "1) Who:" in pre_sum:
+                continue
+            out.at[idx, nk] = str(d[nk]).strip()
 
     # Cluster group ids (deterministic hash buckets)
     fps = out["ai_cluster_fingerprint"].fillna("").astype(str).str.strip()
