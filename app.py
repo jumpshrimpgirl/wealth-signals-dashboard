@@ -17,13 +17,14 @@ import streamlit as st
 
 from data import fetch_signals, format_wealth
 from person_validation import is_valid_person
-from prospect_clean import clean_and_standardize
+from prospect_processor import process_and_rank_prospects
 from slack_alerts import send_slack_alert
 
 
 def _load_signals_df() -> pd.DataFrame:
-    """Load signals from RSS/sample pipeline and notify Slack for high-priority rows when configured."""
+    """Load signals, then rank by match × signal quality (``process_and_rank_prospects``)."""
     df = fetch_signals()
+    df = process_and_rank_prospects(df)
     try:
         send_slack_alert(df.to_dict("records"))
     except Exception:
@@ -40,55 +41,29 @@ HOME_TOP_SIGNALS = 5
 
 # Explore view: drop weak / noisy rows (after sidebar filters)
 EXPLORE_MIN_SCORE = 30
-# Validated prospect table: smart score (``score_prospect``) floor for top tier
-TOP_TIER_MIN_SMART_CONFIDENCE = 50
-
 # Columns searched by the sidebar text box (must stay aligned with Details / table labels).
 SEARCHABLE_COLUMNS = (
     "person_name",
     "company_name",
     "raw_title",
     "role",
+    "summary",
+    "priority_score",
+    "priority_label",
+    "signal_type",
     "wealth_signal_label",
     "liquidity_event",
     "client_type",
     "source_of_wealth",
     "why_it_matters",
     "ai_summary",
-    "ai_wealth_signal",
-    "ai_liquidity_label",
-    "ai_client_who",
-    "ai_why_money",
-    "ai_why_it_matters",
-    "ai_outreach",
+    "full_explanation",
     "est_wealth_display",
     "net_worth",
     "billionaire_company",
     "priority_level",
-    "full_explanation",
-    "prospect_quality",
-    "ai_why_flagged",
-    "ai_why_matters_fa",
-    "ai_cluster_fingerprint",
-    "cluster_group_id",
-    "ai_fa_usefulness_score",
-    "extracted_person_name",
-    "extracted_role",
-    "extracted_company",
-    "ai_net_worth_inferred",
-    "ai_wealth_estimate_confidence",
-    "ai_extraction_confidence",
-    "fa_prospect_identified",
-    "fa_structured_name",
-    "fa_relevance",
-    "fa_why_one_sentence",
-    "fa_priority_debug",
-    "fa_suppression_level",
-    "fa_suppression_reason",
-    "person_name_validation",
     "prospect_bio",
     "engine_pipeline_score",
-    "prospect_label",
 )
 
 # Company field: clear when it looks like a news outlet (substring match on normalized name)
@@ -222,16 +197,18 @@ def _person_clean_token(x) -> str:
 
 def prepare_explore_view(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Final pass for Explore / Home / Details: drop noisy rows, clarify fields, sort best → worst.
-
-    Does not change underlying ``signals_df``; operates on the filtered view only.
+    Explore / Home / Details: keep broad recall, floor by ``priority_score`` (same as ``score``),
+    sort by match × signal ranking only.
     """
     if df is None or df.empty:
         return df
     out = df.copy()
-    out = out[out["event_type"].astype(str).str.strip() != "Other"]
-    sc = pd.to_numeric(out["score"], errors="coerce").fillna(0)
-    out = out[sc >= EXPLORE_MIN_SCORE]
+    pn = out["person_name"].fillna("").astype(str).str.strip()
+    out = out[pn != ""]
+    if out.empty:
+        return out
+    ps = pd.to_numeric(out.get("priority_score", out["score"]), errors="coerce").fillna(0)
+    out = out[ps >= EXPLORE_MIN_SCORE]
     if out.empty:
         return out
     if "source_url" in out.columns:
@@ -240,6 +217,7 @@ def prepare_explore_view(df: pd.DataFrame) -> pd.DataFrame:
         out["source_outlet"] = ""
     out["company_name"] = out["company_name"].fillna("").astype(str).map(_company_clear_if_known_outlet)
     out["person_name"] = out["person_name"].fillna("").astype(str).map(_person_clean_token)
+    out = out[out["person_name"].str.strip() != ""]
     if "ai_summary" not in out.columns:
         out["ai_summary"] = ""
     out["ai_summary"] = out.apply(
@@ -247,7 +225,8 @@ def prepare_explore_view(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
     out["target_client"] = out.apply(
-        lambda r: "YES" if int(pd.to_numeric(r.get("score"), errors="coerce") or 0) >= 70 else "NO",
+        lambda r: "YES" if int(pd.to_numeric(r.get("priority_score", r.get("score")), errors="coerce") or 0) >= 70
+        else "NO",
         axis=1,
     )
     for q in ("quality_score", "confidence_score"):
@@ -255,42 +234,14 @@ def prepare_explore_view(df: pd.DataFrame) -> pd.DataFrame:
             out[q] = 0
         else:
             out[q] = pd.to_numeric(out[q], errors="coerce").fillna(0)
-    if "ai_fa_usefulness_score" not in out.columns:
-        out["ai_fa_usefulness_score"] = 0
-    else:
-        out["ai_fa_usefulness_score"] = pd.to_numeric(out["ai_fa_usefulness_score"], errors="coerce").fillna(0)
-    if "prospect_quality" not in out.columns:
-        out["prospect_quality"] = ""
-    else:
-        out["prospect_quality"] = out["prospect_quality"].fillna("").astype(str)
-    if "prospect_label" not in out.columns:
-        out["prospect_label"] = ""
-    else:
-        out["prospect_label"] = out["prospect_label"].fillna("").astype(str)
-    out["score"] = pd.to_numeric(out["score"], errors="coerce").fillna(0)
-    if "wealth_rank" not in out.columns:
-        out["wealth_rank"] = 3
-    out["wealth_rank"] = pd.to_numeric(out["wealth_rank"], errors="coerce").fillna(3).astype(int)
+    out["score"] = pd.to_numeric(out.get("priority_score", out["score"]), errors="coerce").fillna(0)
     if "event_date" not in out.columns:
         out["event_date"] = pd.NaT
     out["wealth_signal_display"] = out.apply(wealth_signal_for_display, axis=1)
     out["liquidity_display"] = out.apply(liquidity_for_display, axis=1)
-    out["_person_clear"] = (out["person_name"].fillna("").astype(str).str.strip() != "").astype(int)
-    sort_cols: list[str] = []
-    sort_asc: list[bool] = []
-    if "ai_rerank_priority" in out.columns:
-        out["ai_rerank_priority"] = pd.to_numeric(out["ai_rerank_priority"], errors="coerce")
-        if bool(out["ai_rerank_priority"].notna().any()):
-            sort_cols.append("ai_rerank_priority")
-            sort_asc.append(True)
-    if "ai_fa_usefulness_score" in out.columns:
-        out["ai_fa_usefulness_score"] = pd.to_numeric(out["ai_fa_usefulness_score"], errors="coerce").fillna(0)
-        sort_cols.append("ai_fa_usefulness_score")
-        sort_asc.append(False)
-    sort_cols.extend(["wealth_rank", "_person_clear", "event_date", "quality_score", "score"])
-    sort_asc.extend([True, False, False, False, False])
-    out = out.sort_values(by=sort_cols, ascending=sort_asc, na_position="last")
-    return out.drop(columns=["_person_clear"], errors="ignore")
+    sort_key = "priority_score" if "priority_score" in out.columns else "score"
+    out = out.sort_values(by=sort_key, ascending=False, na_position="last")
+    return out.reset_index(drop=True)
 
 
 # Hero sections: core event types rank above "Other" (do not use categorical sort — it reversed order).
@@ -950,7 +901,9 @@ def format_detected_utc(ts) -> str:
 def priority_badge_html(level: str) -> str:
     """HTML badge for priority level (styled via CSS)."""
     lv = (level or "").strip()
-    if lv == "High":
+    if lv == "Elite":
+        cls = "ws-badge ws-badge--high"
+    elif lv == "High":
         cls = "ws-badge ws-badge--high"
     elif lv == "Medium":
         cls = "ws-badge ws-badge--medium"
@@ -961,14 +914,6 @@ def priority_badge_html(level: str) -> str:
 
 def new_pill_html() -> str:
     return '<span class="ws-pill">NEW</span>'
-
-
-def prospect_label_html(label: str) -> str:
-    """Badge when engine marks HIGH signal priority but confidence is still low."""
-    t = str(label or "").strip()
-    if not t:
-        return ""
-    return f'<span class="ws-enrichment-label">{html.escape(t)}</span>'
 
 
 def safe_href(url: str) -> str:
@@ -984,141 +929,11 @@ def event_type_badge_html(event_type: str) -> str:
     return f'<span class="ws-badge ws-badge--low">{html.escape(et)}</span>'
 
 
-def _ai_ranking_enabled() -> bool:
-    return os.environ.get("WEALTH_SIGNALS_AI_RANKING", "1").lower() not in ("0", "false", "no")
-
-
 def rank_signals_with_ai(df: pd.DataFrame) -> list[dict]:
     """
-    Advisor-style ordering: pick the best HOME_TOP_SIGNALS opportunities from the top 20 by score.
-
-    Returns a list of dicts (best → worst). Does **not** read or write pipeline scores — ranking only.
-    On failure or missing API, returns [] so the caller falls back to score sort.
+    Legacy AI rerank — **disabled**. Ranking is exclusively from ``process_and_rank_prospects``.
     """
-    if df is None or df.empty:
-        return []
-    if not _ai_ranking_enabled() or not os.environ.get("OPENAI_API_KEY", "").strip():
-        return []
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return []
-    if "score" not in df.columns:
-        return []
-
-    candidates = df.sort_values("score", ascending=False).head(20).reset_index(drop=True)
-    if candidates.empty:
-        return []
-
-    signals: list[dict] = []
-    for _, row in candidates.iterrows():
-        try:
-            ew = float(row.get("estimated_wealth") or 0)
-        except (TypeError, ValueError):
-            ew = 0.0
-        try:
-            agg = float(row.get("aggregated_estimated_wealth") or 0)
-        except (TypeError, ValueError):
-            agg = 0.0
-        nw = agg if agg > 0 else ew
-        signals.append(
-            {
-                "person": str(row.get("person_name", "") or ""),
-                "company": str(row.get("company_name", "") or ""),
-                "event": str(row.get("event_type", "") or ""),
-                "title": str(row.get("raw_title", "") or ""),
-                "score": int(row.get("score") or 0),
-                "net_worth": round(nw, 0),
-                "source_url": str(row.get("source_url", "") or ""),
-            }
-        )
-
-    k = min(HOME_TOP_SIGNALS, len(signals))
-    if k < 1:
-        return []
-    if k == 1:
-        return [signals[0]]
-
-    payload = json.dumps(signals, indent=2)
-    prompt = f"""You are a private banker scanning for high-net-worth client leads (not a news editor).
-
-From this list of signals, select the BEST {k} outreach opportunities.
-
-Rules:
-- Prioritize clear wealth signals: liquidity (exits, IPOs, large funding), identifiable individuals with money movement
-- Use net_worth only as a hint for scale — do NOT prefer a story because the outlet is famous (BBC, Reuters, etc.)
-- Ignore macro-only or political stories with no personal wealth angle
-- Ignore journalists, locations, governments as the primary "person"
-- Prefer real individuals with plausible monetization or existing wealth
-
-Return a JSON object with a single key "ranked" whose value is an array of exactly {k} objects.
-Each object must include these keys copied exactly from the chosen rows in the list below:
-person, company, event, title, score, net_worth, source_url
-Order the array best opportunity first, worst last. Do not change numeric scores.
-
-Signals:
-{payload}
-"""
-
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "").strip())
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.3,
-        )
-    except Exception as e:
-        print("AI ranking failed:", e)
-        return []
-
-    raw_content = (response.choices[0].message.content or "").strip()
-    if not raw_content:
-        return []
-
-    try:
-        data = json.loads(raw_content)
-    except json.JSONDecodeError:
-        return []
-
-    ranked = data.get("ranked") if isinstance(data, dict) else None
-    if not isinstance(ranked, list):
-        return []
-
-    allowed = {str(s.get("source_url") or "").strip() for s in signals if s.get("source_url")}
-    out: list[dict] = []
-    seen: set[str] = set()
-    for obj in ranked:
-        if not isinstance(obj, dict):
-            continue
-        u = str(obj.get("source_url") or "").strip()
-        if u and u in allowed and u not in seen:
-            out.append(
-                {
-                    "person": str(obj.get("person", "") or ""),
-                    "company": str(obj.get("company", "") or ""),
-                    "event": str(obj.get("event", "") or ""),
-                    "title": str(obj.get("title", "") or ""),
-                    "score": obj.get("score", 0),
-                    "net_worth": obj.get("net_worth", 0),
-                    "source_url": u,
-                }
-            )
-            seen.add(u)
-        if len(out) >= k:
-            break
-
-    if len(out) < k:
-        for s in signals:
-            if len(out) >= k:
-                break
-            u = str(s.get("source_url") or "").strip()
-            if u and u not in seen:
-                out.append(s)
-                seen.add(u)
-
-    return out[:k]
+    return []
 
 
 def lookup_home_row_for_ai(df: pd.DataFrame, item: dict) -> pd.Series | None:
@@ -1155,11 +970,13 @@ def render_home_signal_card(row: pd.Series) -> None:
         c1, c2 = st.columns([3, 1])
         with c1:
             st.markdown(
-                f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}{prospect_label_html(row.get("prospect_label", ""))}</p>""",
+                f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
                 unsafe_allow_html=True,
             )
+            _plab = str(row.get("priority_label") or row.get("priority_level") or "").strip()
+            _ps = int(pd.to_numeric(row.get("priority_score", row.get("score")), errors="coerce") or 0)
             st.markdown(
-                f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(row.get("priority_level", ""))} | Score: {int(row.get("score", 0) or 0)} | {out_e}</p>""",
+                f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(_plab)} | Priority: {_ps} | {out_e}</p>""",
                 unsafe_allow_html=True,
             )
             st.markdown(
@@ -1168,7 +985,7 @@ def render_home_signal_card(row: pd.Series) -> None:
             )
         with c2:
             st.markdown(
-                f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{int(row.get("score", 0) or 0)}</p>""",
+                f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{_ps}</p>""",
                 unsafe_allow_html=True,
             )
         _cap = str(row.get("ai_outreach", "") or "").strip() or str(row.get("suggested_next_step", "") or "")
@@ -1234,8 +1051,16 @@ ensure_columns_present(
         "extracted_person_name",
         "extracted_role",
         "extracted_company",
-        "prospect_quality",
-        "ai_fa_usefulness_score",
+        "summary",
+        "signal_score",
+        "match_score",
+        "priority_score",
+        "priority_label",
+        "est_wealth",
+        "signal_type",
+        "name",
+        "company",
+        "source_title",
         "ai_rerank_priority",
         "ai_why_flagged",
         "ai_why_matters_fa",
@@ -1275,7 +1100,6 @@ ensure_columns_present(
         "ingest_overall_extraction_confidence",
         "prospect_bio",
         "engine_pipeline_score",
-        "prospect_label",
     ],
 )
 
@@ -1375,13 +1199,13 @@ selected_client_types = st.sidebar.multiselect(
 )
 
 min_score = st.sidebar.slider(
-    "Minimum pipeline score",
+    "Minimum priority score",
     min_value=0,
     max_value=100,
     value=TOP_CURATED_MIN_SCORE,
     help=(
-        "Internal 0–100 match score (liquidity, role, entities—not outlet prestige). "
-        f"Applies to Home top {HOME_TOP_SIGNALS}, the table, and Details."
+        "Floor for **priority_score** (signal strength + match quality, 0–100). "
+        f"Applies to Home top {HOME_TOP_SIGNALS}, Explore table, and Details."
     ),
 )
 
@@ -1448,8 +1272,16 @@ ensure_columns_present(
         "extracted_person_name",
         "extracted_role",
         "extracted_company",
-        "prospect_quality",
-        "ai_fa_usefulness_score",
+        "summary",
+        "signal_score",
+        "match_score",
+        "priority_score",
+        "priority_label",
+        "est_wealth",
+        "signal_type",
+        "name",
+        "company",
+        "source_title",
         "ai_rerank_priority",
         "ai_why_flagged",
         "ai_why_matters_fa",
@@ -1489,7 +1321,6 @@ ensure_columns_present(
         "ingest_overall_extraction_confidence",
         "prospect_bio",
         "engine_pipeline_score",
-        "prospect_label",
     ],
 )
 
@@ -1578,9 +1409,8 @@ with tab_home:
                 st.session_state.signals_df = _load_signals_df()
                 st.rerun()
         st.caption(
-            f"Up to **{HOME_TOP_SIGNALS}** prospects from your current sidebar filters. "
-            f"When AI ranking is on, the best {HOME_TOP_SIGNALS} are chosen from the top 20 by pipeline score; "
-            "ranking favors wealth-signal strength and identifiable people, not news outlet prestige."
+            f"Top **{HOME_TOP_SIGNALS}** by **priority score** (signal × match quality) after your sidebar filters — "
+            "not raw NER or legacy AI rerank."
         )
 
         if len(signals_df) == 0:
@@ -1589,22 +1419,13 @@ with tab_home:
             st.info("No rows match your filters - widen event types or lower the minimum score, or open **Explore & data**.")
         elif len(explore_view) == 0:
             st.info(
-                "No signals pass the explore view (score ≥ **30**, event type not **Other**). "
-                "Lower the minimum score or widen event types."
+                f"No signals pass the current floor (priority score ≥ **{EXPLORE_MIN_SCORE}**). "
+                "Lower the minimum score slider or widen filters."
             )
         else:
-            ranked_signals = rank_signals_with_ai(explore_view)
-            if not ranked_signals:
-                top_home = explore_view.head(HOME_TOP_SIGNALS)
-                for _, row in top_home.iterrows():
-                    render_home_signal_card(row)
-            else:
-                for item in ranked_signals:
-                    row = lookup_home_row_for_ai(explore_view, item)
-                    if row is not None:
-                        render_home_signal_card(row)
-                    else:
-                        render_home_signal_card_simple(item)
+            top_home = explore_view.head(HOME_TOP_SIGNALS)
+            for _, row in top_home.iterrows():
+                render_home_signal_card(row)
     st.caption(f"Full feed, search, and row details are on the **Explore & data** tab.")
 
 with tab_explore:
@@ -1641,182 +1462,86 @@ with tab_explore:
     # -----------------------------------------------------------------------------
     # Main table (narrow columns — same data as Details / Home)
     # -----------------------------------------------------------------------------
-    _DISPLAY_RENAME = {
-        "person_name": "Name",
-        "role": "Role / title",
-        "company_name": "Company",
-        "wealth_signal_display": "Wealth signal",
-        "liquidity_display": "Liquidity event",
-        "est_wealth_display": "Est. wealth (display)",
-        "client_type": "Client type",
-        "prospect_quality": "Prospect quality",
-        "prospect_label": "Signal label",
-        "ai_fa_usefulness_score": "FA usefulness",
-        "ai_summary": "AI summary",
-    }
-    _NARROW_COLS = [
-        "person_name",
+    _PROC_COLS = [
+        "name",
         "role",
-        "company_name",
-        "wealth_signal_display",
-        "liquidity_display",
-        "est_wealth_display",
-        "client_type",
-        "prospect_quality",
-        "prospect_label",
-        "ai_fa_usefulness_score",
-        "ai_summary",
+        "company",
+        "signal_type",
+        "signal_score",
+        "match_score",
+        "priority_score",
+        "priority_label",
+        "est_wealth",
+        "source_title",
+        "source_url",
+        "summary",
     ]
+    _PROC_RENAME = {
+        "name": "Name",
+        "role": "Role / title",
+        "company": "Company",
+        "signal_type": "Signal type",
+        "signal_score": "Signal",
+        "match_score": "Match",
+        "priority_score": "Priority",
+        "priority_label": "Tier",
+        "est_wealth": "Est. wealth",
+        "source_title": "Headline",
+        "source_url": "URL",
+        "summary": "Summary",
+    }
 
     st.markdown(
         """
     <div class="ws-section-head">
       <h2 class="ws-h2">Prospect table</h2>
-      <p class="ws-section-sub">Same columns as <strong>Details</strong> and the same filters as the sidebar. Sorted by AI re-rank / usefulness when available, then wealth-signal strength, named person, and recency—not by outlet.</p>
+      <p class="ws-section-sub">Signal (article) + match (person) → <strong>priority_score</strong>. Same ranked rows as Home.</p>
     </div>
     """,
         unsafe_allow_html=True,
     )
     st.write(
-        f"Showing **{len(explore_view)}** prospect row(s) (score ≥ {EXPLORE_MIN_SCORE}, story category not **Other**)."
+        f"Showing **{len(explore_view)}** row(s) (priority score ≥ **{EXPLORE_MIN_SCORE}**, sidebar filters applied)."
     )
 
     if explore_view.empty:
         st.info(
-            "No rows in this view. Try clearing search, widening filters, lowering the minimum pipeline score, "
-            f"or note that this view hides **Other** stories and scores below **{EXPLORE_MIN_SCORE}**."
+            "No rows in this view. Try clearing search, widening filters, or lowering the minimum priority score."
         )
     else:
-        cleaned_rows = clean_and_standardize(explore_view.to_dict("records"))
-        _CLEAN_RENAME = {
-            "name": "Name",
-            "role": "Role / title",
-            "company": "Company",
-            "signal_type": "Signal type",
-            "priority": "Priority",
-            "confidence": "Confidence",
-            "est_wealth": "Est. wealth",
-        }
-        if cleaned_rows:
-            st.caption(
-                "Validated pipeline: two-word names, target roles (founder/CEO/etc.), real company, "
-                "no obvious org/region/fictional/deceased cues; **Confidence** is a 0–100 smart score (role, signals, "
-                f"$ magnitude, recency). Table shows **top tier** rows with confidence **> {TOP_TIER_MIN_SMART_CONFIDENCE}**; "
-                "if none qualify, all validated rows are shown."
-            )
-            cdf = pd.DataFrame(cleaned_rows)[
-                ["name", "role", "company", "signal_type", "priority", "confidence", "est_wealth"]
-            ]
-            cdf_top = cdf[cdf["confidence"] > TOP_TIER_MIN_SMART_CONFIDENCE]
-            if cdf_top.empty:
-                st.info(
-                    f"No validated prospects with smart confidence **> {TOP_TIER_MIN_SMART_CONFIDENCE}** — "
-                    "showing every validated row (sorted by confidence)."
-                )
-                cdf = cdf.rename(columns=_CLEAN_RENAME)
-            else:
-                cdf = cdf_top.rename(columns=_CLEAN_RENAME)
-            st.dataframe(
-                cdf,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Name": st.column_config.TextColumn("Name", width="medium"),
-                    "Role / title": st.column_config.TextColumn("Role / title", width="medium"),
-                    "Company": st.column_config.TextColumn("Company", width="medium"),
-                    "Signal type": st.column_config.TextColumn(
-                        "Signal type",
-                        width="small",
-                        help="Event or wealth-signal category.",
-                    ),
-                    "Priority": st.column_config.TextColumn(
-                        "Priority",
-                        width="small",
-                        help="HIGH / MEDIUM / LOW from signal strength and rules.",
-                    ),
-                    "Confidence": st.column_config.NumberColumn(
-                        "Confidence",
-                        width="small",
-                        format="%d",
-                        help="0–100 smart prioritization score (entity penalties, role, company, deal text, money, recency).",
-                    ),
-                    "Est. wealth": st.column_config.TextColumn(
-                        "Est. wealth",
-                        width="small",
-                        help="Parsed $ from text or role-based band; Data pending if unknown.",
-                    ),
-                },
-            )
-        else:
-            st.info(
-                "No rows passed the strict validation pipeline (e.g. two-word name, target role, company required). "
-                "Showing the full **Explore** columns below."
-            )
-            display_narrow = explore_view[_NARROW_COLS].copy()
-            display_narrow = display_narrow.rename(columns=_DISPLAY_RENAME)
-            st.dataframe(
-                display_narrow,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Name": st.column_config.TextColumn(
-                        "Name",
-                        width="medium",
-                        help="Identified individual; prospecting target.",
-                    ),
-                    "Role / title": st.column_config.TextColumn(
-                        "Role / title",
-                        width="medium",
-                        help="Current or stated role (e.g. CEO, founder).",
-                    ),
-                    "Company": st.column_config.TextColumn(
-                        "Company",
-                        width="medium",
-                        help="Associated company or employer when known.",
-                    ),
-                    "Wealth signal": st.column_config.TextColumn(
-                        "Wealth signal",
-                        width="small",
-                        help="Strong / Moderate / Weak / None — how clearly the story implies money or liquidity (AI may refine).",
-                    ),
-                    "Liquidity event": st.column_config.TextColumn(
-                        "Liquidity event",
-                        width="small",
-                        help="Yes / Potential / No — is cash, stock sale, funding, or similar in play?",
-                    ),
-                    "Est. wealth (display)": st.column_config.TextColumn(
-                        "Est. wealth (display)",
-                        width="small",
-                        help="Parsed or inferred estimate for this row; 'Data pending' when unknown.",
-                    ),
-                    "Client type": st.column_config.TextColumn(
-                        "Client type",
-                        width="medium",
-                        help="Founder, executive, investor, athlete, heir, etc.",
-                    ),
-                    "Prospect quality": st.column_config.TextColumn(
-                        "Prospect quality",
-                        width="small",
-                        help="AI tier: Excellent / Possible / Low-value / Not actionable.",
-                    ),
-                    "Signal label": st.column_config.TextColumn(
-                        "Signal label",
-                        width="medium",
-                        help="High financial signal from the article, but enrichment confidence is still low — follow up manually.",
-                    ),
-                    "FA usefulness": st.column_config.NumberColumn(
-                        "FA usefulness",
-                        width="small",
-                        help="0–100: how useful this article is for advisor prospecting (AI decision layer).",
-                        format="%d",
-                    ),
-                    "AI summary": st.column_config.TextColumn(
-                        "AI summary",
-                        width="large",
-                        help="Advisor-style summary or headline fallback.",
-                    ),
-                },
-            )
+        st.caption(
+            "**Priority** = signal_score (0–60, article/event) + match_score (0–40, person fit). "
+            "Tier: Elite / High / Medium / Low."
+        )
+        _show = explore_view.copy()
+        for c in _PROC_COLS:
+            if c not in _show.columns:
+                _show[c] = ""
+        disp = _show[_PROC_COLS].rename(columns=_PROC_RENAME)
+        if os.environ.get("WEALTH_SIGNALS_DEV_DEBUG", "").lower() in ("1", "true", "yes"):
+            if "debug_signal_reasons" in _show.columns:
+                disp["debug_signal"] = _show["debug_signal_reasons"].fillna("")
+            if "debug_match_reasons" in _show.columns:
+                disp["debug_match"] = _show["debug_match_reasons"].fillna("")
+        st.dataframe(
+            disp,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Name": st.column_config.TextColumn("Name", width="medium"),
+                "Role / title": st.column_config.TextColumn("Role / title", width="medium"),
+                "Company": st.column_config.TextColumn("Company", width="medium"),
+                "Signal type": st.column_config.TextColumn("Signal type", width="small"),
+                "Signal": st.column_config.NumberColumn("Signal", width="small", format="%d"),
+                "Match": st.column_config.NumberColumn("Match", width="small", format="%d"),
+                "Priority": st.column_config.NumberColumn("Priority", width="small", format="%d"),
+                "Tier": st.column_config.TextColumn("Tier", width="small"),
+                "Est. wealth": st.column_config.TextColumn("Est. wealth", width="small"),
+                "Headline": st.column_config.TextColumn("Headline", width="large"),
+                "URL": st.column_config.LinkColumn("URL", width="small"),
+                "Summary": st.column_config.TextColumn("Summary", width="large"),
+            },
+        )
     
     # -----------------------------------------------------------------------------
     # Details: compact scrollable panel (expandable rows)
@@ -1842,29 +1567,42 @@ with tab_explore:
 
         def _details_priority_label(v: str) -> str:
             return {
-                "all": "All",
-                "high": "High priority",
-                "medium": "Medium priority",
-                "low": "Low priority",
+                "all": "All tiers",
+                "elite": "Elite",
+                "high": "High",
+                "medium": "Medium",
+                "low": "Low",
             }[v]
 
         priority_filter = st.radio(
-            "Priority",
-            ["all", "high", "medium", "low"],
+            "Tier",
+            ["all", "elite", "high", "medium", "low"],
             horizontal=True,
             format_func=_details_priority_label,
             key="details_priority_filter",
-            help="Wealth-based priority: High only when the pipeline finds a strong money or liquidity signal for a targetable person—not general news importance.",
+            help="Filter by match×signal tier (Elite 90+, High 75+, Medium 55+, Low under 55).",
         )
 
         details_filtered = explore_view.copy()
-        if priority_filter != "all" and "priority_level" in details_filtered.columns:
-            _pl = {"high": "High", "medium": "Medium", "low": "Low"}[priority_filter]
-            details_filtered = details_filtered[details_filtered["priority_level"] == _pl]
+        if priority_filter != "all" and "priority_label" in details_filtered.columns:
+            _pl = {
+                "elite": "Elite",
+                "high": "High",
+                "medium": "Medium",
+                "low": "Low",
+            }[priority_filter]
+            details_filtered = details_filtered[
+                details_filtered["priority_label"].astype(str).str.strip() == _pl
+            ]
+        elif priority_filter != "all" and "priority_level" in details_filtered.columns:
+            _pl = {"elite": "Elite", "high": "High", "medium": "Medium", "low": "Low"}[priority_filter]
+            details_filtered = details_filtered[
+                details_filtered["priority_level"].astype(str).str.strip() == _pl
+            ]
     
         with st.container(height=580, border=False, key="ws_details_scroll"):
             if details_filtered.empty:
-                st.caption("No rows match this priority. Set Priority to All.")
+                st.caption("No rows match this tier. Set Tier to All tiers.")
             else:
                 for _, row in details_filtered.iterrows():
                     also = _format_additional_people(row.get("additional_people"))
@@ -1878,8 +1616,9 @@ with tab_explore:
                         date_str = ts.strftime("%Y-%m-%d")
                     det = human_time_ago(row.get("detected_at"))
                     with st.expander(title_plain):
+                        _tier = str(row.get("priority_label") or row.get("priority_level") or "").strip()
                         st.markdown(
-                            f"""<p style="margin:0 0 0.75rem 0;">{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html} {priority_badge_html(row.get("priority_level", ""))}{prospect_label_html(row.get("prospect_label", ""))}</p>""",
+                            f"""<p style="margin:0 0 0.75rem 0;">{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html} {priority_badge_html(_tier)}</p>""",
                             unsafe_allow_html=True,
                         )
                         if row.get("is_billionaire"):
@@ -1907,6 +1646,15 @@ with tab_explore:
                             st.caption(f"Name validation: {_pval}")
                         st.markdown(f"**Company:** {_fa_nonempty(row.get('company_name'), fallback='Not identified')}")
 
+                        st.markdown("##### Match × signal scores")
+                        _ps = int(pd.to_numeric(row.get("priority_score", row.get("score")), errors="coerce") or 0)
+                        _ss = int(pd.to_numeric(row.get("signal_score"), errors="coerce") or 0)
+                        _ms = int(pd.to_numeric(row.get("match_score"), errors="coerce") or 0)
+                        st.markdown(
+                            f"**Priority:** {_ps} (signal {_ss} + match {_ms}) · **Tier:** {_cell_str(row.get('priority_label'))}"
+                        )
+                        st.markdown(f"**Est. wealth (processor):** {_cell_str(row.get('est_wealth'))}")
+
                         st.markdown("##### Wealth & liquidity")
                         st.markdown(f"**Wealth signal:** {wealth_signal_for_display(row)}")
                         st.caption("Strong / Moderate / Weak / None — how clearly the story implies money, liquidity, or ultra-wealth.")
@@ -1926,102 +1674,6 @@ with tab_explore:
 
                         st.markdown(f"**Client type:** {client_type_for_display(row)}")
                         st.caption("Advisor archetype: founder, executive, investor, athlete, heir, or unknown.")
-
-                        st.markdown("##### FA priority (hard gates)")
-                        st.markdown(f"**Prospect identified:** {_cell_str(row.get('fa_prospect_identified'))}")
-                        st.markdown(f"**Structured name:** {_cell_str(row.get('fa_structured_name'))}")
-                        st.markdown(f"**Wealth signal (rules):** {_cell_str(row.get('wealth_signal_label'))}")
-                        st.markdown(f"**Liquidity event (rules):** {_cell_str(row.get('liquidity_event'))}")
-                        st.markdown(f"**FA relevance:** {_cell_str(row.get('fa_relevance'))}")
-                        st.markdown(f"**Why it matters (one line):** {_cell_str(row.get('fa_why_one_sentence'))}")
-                        _gp = row.get("fa_pass_gate_person")
-                        _gw = row.get("fa_pass_gate_wealth_substance")
-                        _gl = row.get("fa_pass_gate_liquidity_or_uhnw")
-                        _gf = row.get("fa_pass_gate_fa_relevance")
-                        st.caption(
-                            f"Gates passed — person: {_boolish(_gp)}; wealth substance: {_boolish(_gw)}; "
-                            f"liquidity / UHNW: {_boolish(_gl)}; FA relevance High: {_boolish(_gf)}"
-                        )
-                        _sup = _cell_str(row.get("fa_suppression_level"))
-                        if _sup and _sup != "none":
-                            st.caption(
-                                f"Suppression: **{_sup}** — {_cell_str(row.get('fa_suppression_reason'))}"
-                            )
-                        _dbg = _cell_str(row.get("fa_priority_debug"))
-                        if _dbg:
-                            st.caption("Priority debug (which rules fired)")
-                            st.code(_dbg, language=None)
-
-                        st.markdown("##### Prospect validation (final gate)")
-                        st.markdown(
-                            f"**Prospect identified:** {_cell_str(row.get('pv_prospect_identified'))} · "
-                            f"**Name:** {_cell_str(row.get('pv_display_name'))}"
-                        )
-                        st.markdown(
-                            f"**Role / title:** {_cell_str(row.get('pv_role_title'))} · "
-                            f"**Wealth signal:** {_cell_str(row.get('pv_wealth_signal'))} · "
-                            f"**Liquidity:** {_cell_str(row.get('pv_liquidity_event'))}"
-                        )
-                        st.markdown(
-                            f"**FA relevance:** {_cell_str(row.get('pv_fa_relevance'))} · "
-                            f"**Why it matters:** {_cell_str(row.get('pv_why_it_matters'))}"
-                        )
-                        _gpv = row.get("pv_gate_prospect_pass")
-                        _gwv = row.get("pv_gate_wealth_pass")
-                        _gfv = row.get("pv_gate_fa_relevance_pass")
-                        st.caption(
-                            f"Gates — prospect: {_boolish(_gpv)}; wealth signal: {_boolish(_gwv)}; "
-                            f"FA relevance (not Low): {_boolish(_gfv)}"
-                        )
-                        _pvd = _cell_str(row.get("pv_validation_debug"))
-                        if _pvd:
-                            st.caption("Validation trace (debug)")
-                            st.code(_pvd, language=None)
-                        _pvew = _cell_str(row.get("pv_estimated_wealth_display"))
-                        if _pvew:
-                            st.caption(f"Estimated wealth (display): {_pvew}")
-
-                        st.markdown("##### AI extraction & advisor ranking")
-                        _pq = _cell_str(row.get("prospect_quality"))
-                        if _pq:
-                            st.markdown(f"**Prospect quality (AI):** {_pq}")
-                        _fus = pd.to_numeric(row.get("ai_fa_usefulness_score"), errors="coerce")
-                        if pd.notna(_fus):
-                            st.markdown(f"**Usefulness for FA (0–100):** {int(_fus)}")
-                        _rp = row.get("ai_rerank_priority")
-                        if pd.notna(_rp):
-                            st.markdown(f"**AI re-rank order:** {int(pd.to_numeric(_rp, errors='coerce') or 0)}")
-                        _wf = _cell_str(row.get("ai_why_flagged"))
-                        if _wf:
-                            st.markdown(f"**Why flagged:** {_wf}")
-                        _wm = _cell_str(row.get("ai_why_matters_fa"))
-                        if _wm:
-                            st.markdown(f"**Why it matters for an advisor:** {_wm}")
-                        _cg = row.get("cluster_group_id")
-                        _cg_s = _cell_str(_cg)
-                        if _cg_s:
-                            st.caption(f"Cluster / dedupe group: {_cg_s}")
-                        _exn = _cell_str(row.get("extracted_person_name"))
-                        _exr = _cell_str(row.get("extracted_role"))
-                        _exc = _cell_str(row.get("extracted_company"))
-                        if _exn or _exr or _exc:
-                            st.caption("Structured extraction (may align with primary fields when confidence is high).")
-                            if _exn:
-                                st.markdown(f"**Structured name:** {_exn}")
-                            if _exr:
-                                st.markdown(f"**Structured role:** {_exr}")
-                            if _exc:
-                                st.markdown(f"**Structured company:** {_exc}")
-                        _nw_inf = row.get("ai_net_worth_inferred")
-                        _wec = _cell_str(row.get("ai_wealth_estimate_confidence")).lower()
-                        if pd.notna(_nw_inf) and str(_nw_inf).strip() != "" and _wec not in ("none", ""):
-                            st.markdown(
-                                f"**Net worth (AI inferred):** {format_wealth(_nw_inf)} "
-                                f"(estimate confidence: {_wec or '—'})"
-                            )
-                        _exconf = pd.to_numeric(row.get("ai_extraction_confidence"), errors="coerce")
-                        if pd.notna(_exconf) and int(_exconf) > 0:
-                            st.caption(f"Field extraction confidence: {int(_exconf)}")
 
                         st.markdown(f"**Why it matters:** {_fa_nonempty(row.get('why_it_matters'), fallback='Data pending')}")
 

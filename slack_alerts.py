@@ -38,18 +38,15 @@ def save_sent(sent_set: set[str]) -> None:
 
 
 def _is_high_priority(p: dict[str, Any]) -> bool:
-    if str(p.get("priority") or "").upper() == "HIGH":
+    pl = str(p.get("priority_label") or "").strip()
+    if pl in ("Elite", "High"):
         return True
-    if str(p.get("signal_priority") or "").upper() == "HIGH":
-        return True
-    ej = p.get("extraction_audit_json")
-    if ej:
-        try:
-            audit = json.loads(ej) if isinstance(ej, str) else ej
-            if isinstance(audit, dict) and str(audit.get("signal_priority") or "").upper() == "HIGH":
-                return True
-        except (json.JSONDecodeError, TypeError):
-            pass
+    try:
+        ps = int(float(p.get("priority_score", p.get("score", 0)) or 0))
+        if ps >= 75:
+            return True
+    except (TypeError, ValueError):
+        pass
     return False
 
 
@@ -57,14 +54,6 @@ def _dedupe_key(p: dict[str, Any]) -> str:
     name = str(p.get("name") or p.get("person_name") or "").strip().lower()
     company = str(p.get("company") or p.get("company_name") or "").strip().lower()
     return f"{name}_{company}"
-
-
-def _confidence(p: dict[str, Any]) -> int:
-    v = p.get("confidence", p.get("confidence_score", 0))
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
 
 
 def send_slack_alert(prospects: list[dict[str, Any]]) -> None:
@@ -96,9 +85,13 @@ def send_slack_alert(prospects: list[dict[str, Any]]) -> None:
         name = str(p.get("name") or p.get("person_name") or "Unknown").strip()
         role = str(p.get("role") or "N/A").strip()
         company = str(p.get("company") or p.get("company_name") or "N/A").strip()
+        try:
+            ps = int(float(p.get("priority_score", p.get("score", 0)) or 0))
+        except (TypeError, ValueError):
+            ps = 0
         message += f"""• *{name}*
 {role} @ {company}
-Confidence: {_confidence(p)}
+Priority: {ps} ({str(p.get("priority_label") or "").strip() or "—"})
 
 """
 
