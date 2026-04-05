@@ -32,13 +32,13 @@ def inject_styles() -> None:
     max-width: 1120px !important;
     padding-left: 2rem !important;
     padding-right: 2rem !important;
-    padding-bottom: 3rem !important;
+    padding-bottom: 2rem !important;
   }
 
   /* Sidebar */
   section[data-testid="stSidebar"] {
-    background: #f8f9fb !important;
-    border-right: 1px solid #e4e7ec !important;
+    background: #e8ecf0 !important;
+    border-right: 1px solid #d1d5db !important;
   }
   section[data-testid="stSidebar"] .block-container {
     padding-top: 1.5rem !important;
@@ -49,13 +49,13 @@ def inject_styles() -> None:
     font-size: 1.85rem;
     font-weight: 600;
     letter-spacing: -0.035em;
-    color: #0f172a;
+    color: #000;
     margin: 0 0 0.35rem 0;
     line-height: 1.2;
   }
   .ws-hero-sub {
     font-size: 0.95rem;
-    color: #64748b;
+    color: #475569;
     margin: 0 0 0.5rem 0;
     line-height: 1.45;
     max-width: 52rem;
@@ -65,38 +65,38 @@ def inject_styles() -> None:
     align-items: center;
     gap: 0.5rem;
     font-size: 0.8125rem;
-    color: #475569;
+    color: #374151;
     background: #fff;
-    border: 1px solid #e4e7ec;
+    border: 1px solid #d1d5db;
     border-radius: 999px;
     padding: 0.35rem 0.85rem;
     margin-top: 0.35rem;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
   }
   .ws-last-updated strong {
-    color: #0f172a;
+    color: #000;
     font-weight: 600;
   }
   .ws-last-updated em {
-    color: #94a3b8;
+    color: #6b7280;
     font-style: normal;
   }
 
   /* Section headers */
   .ws-section-head {
-    margin: 2.25rem 0 0.75rem 0;
+    margin: 1rem 0 0.5rem 0;
   }
   .ws-section-head:first-of-type { margin-top: 0.5rem; }
   .ws-h2 {
     font-size: 1.125rem;
     font-weight: 600;
     letter-spacing: -0.02em;
-    color: #0f172a;
+    color: #000;
     margin: 0 0 0.35rem 0;
   }
   .ws-section-sub {
     font-size: 0.875rem;
-    color: #64748b;
+    color: #475569;
     margin: 0;
     line-height: 1.5;
   }
@@ -104,79 +104,79 @@ def inject_styles() -> None:
   .ws-rule {
     border: none;
     height: 1px;
-    background: linear-gradient(90deg, transparent, #e4e7ec 15%, #e4e7ec 85%, transparent);
-    margin: 2rem 0;
+    background: linear-gradient(90deg, transparent, #d1d5db 15%, #d1d5db 85%, transparent);
+    margin: 1.5rem 0;
   }
 
   /* Metric tiles */
   [data-testid="stMetric"] {
     background: #ffffff !important;
-    border: 1px solid #e4e7ec !important;
+    border: 1px solid #d1d5db !important;
     border-radius: 12px !important;
     padding: 1.1rem 1.25rem !important;
-    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05) !important;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
   }
   [data-testid="stMetric"] label {
-    color: #64748b !important;
+    color: #374151 !important;
     font-size: 0.75rem !important;
     font-weight: 500 !important;
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
   [data-testid="stMetric"] [data-testid="stMetricValue"] {
-    color: #0f172a !important;
+    color: #000 !important;
     font-weight: 600 !important;
   }
 
   /* Bordered blocks (cards) */
   [data-testid="stVerticalBlockBorderWrapper"] {
     background: #ffffff !important;
-    border: 1px solid #e4e7ec !important;
+    border: 1px solid #d1d5db !important;
     border-radius: 14px !important;
-    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04) !important;
-    padding: 1rem 1.15rem !important;
-    margin-bottom: 0.65rem !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
+    padding: 1.5rem 1.75rem !important;
+    margin-bottom: 0.75rem !important;
   }
 
   /* Primary button */
   .stButton > button {
     border-radius: 10px !important;
     font-weight: 500 !important;
-    border: 1px solid #cbd5e1 !important;
-    background: #0f172a !important;
+    border: 1px solid #9ca3af !important;
+    background: #000 !important;
     color: #fff !important;
     padding: 0.5rem 1rem !important;
   }
   .stButton > button:hover {
-    border-color: #0f172a !important;
+    border-color: #000 !important;
     opacity: 0.92;
   }
 
   /* Dataframe shell */
   [data-testid="stDataFrame"] {
-    border: 1px solid #e4e7ec !important;
+    border: 1px solid #d1d5db !important;
     border-radius: 12px !important;
     overflow: hidden !important;
-    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
   }
 
   /* Expanders */
   [data-testid="stExpander"] {
-    border: 1px solid #e4e7ec !important;
+    border: 1px solid #d1d5db !important;
     border-radius: 12px !important;
     margin-bottom: 0.5rem !important;
     background: #fff !important;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04) !important;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
   }
   [data-testid="stExpander"] summary {
     font-weight: 500 !important;
-    color: #0f172a !important;
+    color: #000 !important;
   }
 
   /* Info / caption polish */
   .stAlert {
     border-radius: 12px !important;
-    border: 1px solid #e4e7ec !important;
+    border: 1px solid #d1d5db !important;
   }
 
   /* Horizontal radio */
@@ -212,6 +212,11 @@ def inject_styles() -> None:
     color: #475569;
     border: 1px solid #e2e8f0;
   }
+  .ws-badge--other {
+    background: #ede9fe;
+    color: #5b21b6;
+    border: 1px solid #c4b5fd;
+  }
   .ws-pill {
     display: inline-block;
     font-size: 0.65rem;
@@ -228,28 +233,28 @@ def inject_styles() -> None:
   }
   .ws-score-pill {
     font-family: 'IBM Plex Mono', ui-monospace, monospace;
-    font-size: 1.35rem;
+    font-size: 1.5rem;
     font-weight: 600;
-    color: #0f172a;
+    color: #000;
   }
   .ws-card-line {
     font-size: 0.9rem;
-    color: #334155;
-    line-height: 1.5;
-    margin: 0.15rem 0 0 0;
+    color: #1f2937;
+    line-height: 1.4;
+    margin: 0.1rem 0 0 0;
   }
   .ws-card-meta {
     font-size: 0.78rem;
-    color: #94a3b8;
-    margin-top: 0.35rem;
+    color: #6b7280;
+    margin-top: 0.25rem;
   }
   .ws-link a {
-    color: #0f172a !important;
+    color: #000 !important;
     font-weight: 500;
     text-decoration: none !important;
-    border-bottom: 1px solid #cbd5e1;
+    border-bottom: 1px solid #9ca3af;
   }
-  .ws-link a:hover { border-bottom-color: #0f172a; }
+  .ws-link a:hover { border-bottom-color: #000; }
 </style>
         """,
         unsafe_allow_html=True,
@@ -325,6 +330,14 @@ def safe_href(url: str) -> str:
     return html.escape(str(url), quote=True)
 
 
+def event_type_badge_html(event_type: str) -> str:
+    """Small label for event_type; highlights 'Other' for debugging."""
+    et = (event_type or "").strip()
+    if et == "Other":
+        return '<span class="ws-badge ws-badge--other">OTHER</span>'
+    return f'<span class="ws-badge ws-badge--low">{html.escape(et)}</span>'
+
+
 # -----------------------------------------------------------------------------
 # Page setup
 # -----------------------------------------------------------------------------
@@ -371,6 +384,137 @@ with header_right:
 signals_df = st.session_state.signals_df
 
 # -----------------------------------------------------------------------------
+# Sidebar: filters first (so “Pipeline & debug” can use the filtered dataframe)
+# -----------------------------------------------------------------------------
+st.sidebar.header("Filters")
+
+_event_opts = sorted(signals_df["event_type"].replace("", pd.NA).dropna().unique().tolist())
+if not _event_opts:
+    _event_opts = ["Founder Exit", "Funding", "Promotion", "Board Appointment", "Other"]
+
+selected_types = st.sidebar.multiselect(
+    "Event type",
+    options=_event_opts,
+    default=_event_opts,
+    help="Include every type by default. Narrow to debug specific buckets.",
+)
+
+show_other = st.sidebar.checkbox(
+    "Show low-confidence / Other signals",
+    value=True,
+    help="When off, hides rows with event type “Other” (broad finance/career match).",
+)
+
+min_score = st.sidebar.slider(
+    "Minimum score",
+    min_value=0,
+    max_value=100,
+    value=0,
+    help="Lower this if the table looks empty — ‘Other’ scores 55 by default.",
+)
+
+sort_by = st.sidebar.radio(
+    "Sort list by",
+    ("Newest", "Highest score"),
+    horizontal=True,
+    help="Order for the All signals table and Details section.",
+)
+
+search_q = st.sidebar.text_input(
+    "Search",
+    placeholder="Person or company…",
+    help="Matches person or company name (partial, case-insensitive).",
+).strip()
+
+use_date_filter = st.sidebar.checkbox(
+    "Filter by event date",
+    value=False,
+    help="Off by default so undated or wide date ranges do not hide the feed.",
+)
+
+has_dates = signals_df["event_date"].notna().any()
+date_start: date | None = None
+date_end: date | None = None
+
+if has_dates and use_date_filter:
+    valid = signals_df["event_date"].dropna()
+    dmin = valid.min()
+    dmax = valid.max()
+    dmin_d = dmin.date() if hasattr(dmin, "date") else dmin
+    dmax_d = dmax.date() if hasattr(dmax, "date") else dmax
+    dr = st.sidebar.date_input(
+        "Event date range",
+        value=(dmin_d, dmax_d),
+        min_value=dmin_d,
+        max_value=dmax_d,
+        help="Only applied when “Filter by event date” is on. Rows with no date stay visible.",
+    )
+    if isinstance(dr, tuple) and len(dr) == 2:
+        date_start, date_end = dr[0], dr[1]
+    elif isinstance(dr, (date, datetime)):
+        date_start = date_end = dr.date() if isinstance(dr, datetime) else dr
+
+# --- Apply filters ---
+filtered = signals_df.copy()
+
+if selected_types:
+    filtered = filtered[filtered["event_type"].isin(selected_types)]
+else:
+    filtered = filtered.iloc[0:0]
+
+if not show_other:
+    filtered = filtered[filtered["event_type"] != "Other"]
+
+filtered = filtered[filtered["score"] >= min_score]
+
+if search_q:
+    pn = filtered["person_name"].fillna("").str.lower()
+    cn = filtered["company_name"].fillna("").str.lower()
+    rt = filtered["raw_title"].fillna("").str.lower() if "raw_title" in filtered.columns else pd.Series([""] * len(filtered))
+    mask = (
+        pn.str.contains(search_q, regex=False, na=False)
+        | cn.str.contains(search_q, regex=False, na=False)
+        | rt.str.contains(search_q, regex=False, na=False)
+    )
+    filtered = filtered[mask]
+
+if use_date_filter and date_start is not None and date_end is not None and has_dates:
+    day = filtered["event_date"].dt.date
+    in_range = filtered["event_date"].isna() | ((day >= date_start) & (day <= date_end))
+    filtered = filtered[in_range]
+
+if len(filtered) > 0:
+    if sort_by == "Newest":
+        filtered = filtered.sort_values("detected_at", ascending=False, na_position="last")
+    else:
+        filtered = filtered.sort_values("score", ascending=False, na_position="last")
+
+# --- Pipeline debug (sidebar) ---
+_ingest = getattr(signals_df, "attrs", {}).get("ingest_debug", {})
+with st.sidebar.expander("Pipeline & debug", expanded=False):
+    st.markdown("**Ingestion (last fetch)**")
+    st.caption("If raw ≫ parsed, classification is strict or headlines are off-topic.")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Raw RSS items", _ingest.get("raw_rss_entries", "—"))
+    with c2:
+        st.metric("Parsed signals", _ingest.get("parsed_signal_rows", "—"))
+    st.metric("Rows after dedupe", _ingest.get("rows_after_finalize", len(signals_df)))
+    st.caption(f"Source: `{_ingest.get('data_source', 'unknown')}`")
+    st.divider()
+    st.markdown("**Current view (after filters)**")
+    st.metric("Rows shown", len(filtered))
+    if len(filtered) > 0:
+        miss_p = int((filtered["person_name"].fillna("") == "").sum())
+        miss_r = int((filtered["role"].fillna("") == "").sum())
+        st.caption(f"Missing person_name: **{miss_p}** · Missing role: **{miss_r}**")
+        st.markdown("**Counts by event_type**")
+        _vc = filtered["event_type"].value_counts().rename_axis("event_type").reset_index(name="count")
+        st.dataframe(_vc, hide_index=True, use_container_width=True)
+    else:
+        st.caption("No rows match filters — widen event types, raise score ceiling, or enable Other.")
+
+# -----------------------------------------------------------------------------
 # Top high priority opportunities (action layer — who to act on first)
 # -----------------------------------------------------------------------------
 st.markdown(
@@ -388,7 +532,12 @@ if len(signals_df) == 0:
     top_high = signals_df.iloc[:0]
 else:
     high_only = signals_df[signals_df["priority_level"] == "High"]
-    top_high = high_only.nlargest(5, "score")
+    # Filter for high quality: quality_score >= 2, exclude low-confidence "Other", avoid missing person + weak company
+    high_only = high_only[high_only["quality_score"] >= 2]
+    high_only = high_only[~((high_only["event_type"] == "Other") & (high_only["quality_score"] < 3))]
+    high_only = high_only[~((high_only["person_name"] == "") & (high_only["company_name"] == "Unknown"))]
+    # Sort by quality first, then score
+    top_high = high_only.sort_values(["quality_score", "score"], ascending=[False, False]).head(5)
 
 if len(signals_df) > 0 and len(top_high) == 0:
     st.info("No **High** priority signals right now (score ≥ 85). Lower the minimum score filter below or check back after refresh.")
@@ -397,7 +546,6 @@ elif len(top_high) > 0:
         person = row["person_name"] or "—"
         company = row["company_name"] or "Unknown"
         pe, ce = html.escape(str(person)), html.escape(str(company))
-        evt_e = html.escape(str(row["event_type"]))
         out_e = html.escape(str(row["outreach_angle"]))
         new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
         ago = human_time_ago(row.get("detected_at"))
@@ -410,17 +558,13 @@ elif len(top_high) > 0:
                     unsafe_allow_html=True,
                 )
                 st.markdown(
-                    f'<p class="ws-card-line"><code style="font-size:0.85em;">{evt_e}</code> · {out_e}</p>',
+                    f'<p class="ws-card-line">{event_type_badge_html(row["event_type"])} {priority_badge_html("High")} · Score: {int(row["score"])} · {out_e}</p>',
                     unsafe_allow_html=True,
                 )
                 st.markdown(f'<p class="ws-card-meta">Detected {html.escape(ago)}</p>', unsafe_allow_html=True)
             with c2:
                 st.markdown(
-                    f'<p style="text-align:right;margin:0;">{priority_badge_html("High")}</p>',
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    f'<p class="ws-score-pill" style="text-align:right;margin:0;">{int(row["score"])}</p>',
+                    f'<p style="text-align:right;margin:0;font-size:1.2rem;font-weight:600;">{int(row["score"])}</p>',
                     unsafe_allow_html=True,
                 )
             st.caption(row["suggested_next_step"])
@@ -474,10 +618,19 @@ else:
     dated = signals_df["event_date"].notna()
     in_week = signals_df.loc[dated & (signals_df["event_date"] >= week_ago)]
     if len(in_week) > 0:
-        top_week = in_week.nlargest(5, "score")
+        # Filter for quality
+        in_week = in_week[in_week["quality_score"] >= 2]
+        in_week = in_week[~((in_week["event_type"] == "Other") & (in_week["quality_score"] < 3))]
+        in_week = in_week[~((in_week["person_name"] == "") & (in_week["company_name"] == "Unknown"))]
+        top_week = in_week.sort_values(["quality_score", "score"], ascending=[False, False]).head(5)
         used_week_fallback = False
     else:
-        top_week = signals_df.nlargest(5, "score")
+        # Fallback to overall top, with quality filters
+        overall = signals_df.copy()
+        overall = overall[overall["quality_score"] >= 2]
+        overall = overall[~((overall["event_type"] == "Other") & (overall["quality_score"] < 3))]
+        overall = overall[~((overall["person_name"] == "") & (overall["company_name"] == "Unknown"))]
+        top_week = overall.sort_values(["quality_score", "score"], ascending=[False, False]).head(5)
         used_week_fallback = True
 
 if used_week_fallback and n_total > 0:
@@ -490,7 +643,6 @@ elif len(top_week) > 0:
         person = row["person_name"] or "—"
         company = row["company_name"] or "Unknown"
         pe, ce = html.escape(str(person)), html.escape(str(company))
-        evt_e = html.escape(str(row["event_type"]))
         out_e = html.escape(str(row["outreach_angle"]))
         new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
         ago = human_time_ago(row.get("detected_at"))
@@ -503,7 +655,7 @@ elif len(top_week) > 0:
                     unsafe_allow_html=True,
                 )
                 st.markdown(
-                    f'<p class="ws-card-line"><code style="font-size:0.85em;">{evt_e}</code> · {priority_badge_html(row["priority_level"])}</p>',
+                    f'<p class="ws-card-line">{event_type_badge_html(row["event_type"])} {priority_badge_html(row["priority_level"])} · Score: {int(row["score"])}</p>',
                     unsafe_allow_html=True,
                 )
                 st.markdown(
@@ -525,100 +677,13 @@ elif len(top_week) > 0:
 st.markdown('<hr class="ws-rule"/>', unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# Sidebar filters
-# -----------------------------------------------------------------------------
-st.sidebar.header("Filters")
-
-event_opts = sorted(signals_df["event_type"].replace("", pd.NA).dropna().unique().tolist())
-selected_types = st.sidebar.multiselect(
-    "Event type",
-    options=event_opts,
-    default=event_opts,
-    help="Show only these event categories.",
-)
-
-min_score = st.sidebar.slider(
-    "Minimum score",
-    min_value=0,
-    max_value=100,
-    value=60,
-    help="Hide signals below this score.",
-)
-
-sort_by = st.sidebar.radio(
-    "Sort list by",
-    ("Newest", "Highest score"),
-    horizontal=True,
-    help="Order for the All signals table and Details section.",
-)
-
-search_q = st.sidebar.text_input(
-    "Search",
-    placeholder="Person or company…",
-    help="Matches person or company name (partial, case-insensitive).",
-).strip()
-
-# Date range: only if we have at least one parseable date
-has_dates = signals_df["event_date"].notna().any()
-date_start: date | None = None
-date_end: date | None = None
-
-if has_dates:
-    valid = signals_df["event_date"].dropna()
-    dmin = valid.min()
-    dmax = valid.max()
-    # Streamlit date_input wants date or datetime
-    dmin_d = dmin.date() if hasattr(dmin, "date") else dmin
-    dmax_d = dmax.date() if hasattr(dmax, "date") else dmax
-    dr = st.sidebar.date_input(
-        "Event date range",
-        value=(dmin_d, dmax_d),
-        min_value=dmin_d,
-        max_value=dmax_d,
-        help="Filter rows whose event date falls in this range. Rows with no date stay visible.",
-    )
-    if isinstance(dr, tuple) and len(dr) == 2:
-        date_start, date_end = dr[0], dr[1]
-    elif isinstance(dr, (date, datetime)):
-        date_start = date_end = dr.date() if isinstance(dr, datetime) else dr
-
-# -----------------------------------------------------------------------------
-# Apply filters (search + date + sidebar)
-# -----------------------------------------------------------------------------
-filtered = signals_df.copy()
-
-if selected_types:
-    filtered = filtered[filtered["event_type"].isin(selected_types)]
-else:
-    filtered = filtered.iloc[0:0]
-
-filtered = filtered[filtered["score"] >= min_score]
-
-if search_q:
-    pn = filtered["person_name"].fillna("").str.lower()
-    cn = filtered["company_name"].fillna("").str.lower()
-    mask = pn.str.contains(search_q, regex=False, na=False) | cn.str.contains(search_q, regex=False, na=False)
-    filtered = filtered[mask]
-
-if date_start is not None and date_end is not None and has_dates:
-    day = filtered["event_date"].dt.date
-    in_range = filtered["event_date"].isna() | ((day >= date_start) & (day <= date_end))
-    filtered = filtered[in_range]
-
-# Sort (feed vs score ranking)
-if len(filtered) > 0:
-    if sort_by == "Newest":
-        filtered = filtered.sort_values("detected_at", ascending=False, na_position="last")
-    else:
-        filtered = filtered.sort_values("score", ascending=False, na_position="last")
-
-# -----------------------------------------------------------------------------
 # Main table (formatted for readability)
 # -----------------------------------------------------------------------------
 table_columns = [
     "person_name",
     "company_name",
     "event_type",
+    "raw_title",
     "role",
     "event_date",
     "score",
@@ -626,6 +691,7 @@ table_columns = [
     "outreach_angle",
     "why_it_matters",
     "source_url",
+    "quality_score",
 ]
 
 display_df = filtered[table_columns].copy()
@@ -659,6 +725,7 @@ else:
             "person_name": st.column_config.TextColumn("Person", width="medium"),
             "company_name": st.column_config.TextColumn("Company", width="medium"),
             "event_type": st.column_config.TextColumn("Event", width="small"),
+            "raw_title": st.column_config.TextColumn("Raw title (debug)", width="large"),
             "role": st.column_config.TextColumn("Role", width="small"),
             "event_date": st.column_config.TextColumn("Date", width="small"),
             "score": st.column_config.NumberColumn("Score", format="%d", width="small"),
@@ -667,6 +734,7 @@ else:
             "why_it_matters": st.column_config.TextColumn("Why it matters", width="large"),
             "Detected": st.column_config.TextColumn("Detected", width="small"),
             "source_url": st.column_config.LinkColumn("Source", width="medium"),
+            "quality_score": st.column_config.NumberColumn("Quality", format="%d", width="small"),
         },
     )
 
@@ -701,6 +769,7 @@ for _, row in filtered.iterrows():
             f'<p style="margin:0 0 0.75rem 0;">{new_html} {priority_badge_html(row["priority_level"])}</p>',
             unsafe_allow_html=True,
         )
+        st.markdown(f"**Raw title:** {row.get('raw_title', '—')}")
         st.markdown(f"**Priority:** {row['priority_level']}")
         st.markdown(f"**Detected:** {det}")
         st.markdown(f"**Outreach suggestion:** {row['outreach_angle']}")

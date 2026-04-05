@@ -15,6 +15,7 @@ EVENT_SCORES = {
     "Funding": 80,
     "Promotion": 70,
     "Board Appointment": 65,
+    "Other": 55,  # Broad finance/career headlines that did not match core categories
 }
 
 

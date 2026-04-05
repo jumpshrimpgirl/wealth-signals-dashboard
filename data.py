@@ -23,6 +23,7 @@ REQUIRED_COLUMNS = [
     "person_name",
     "company_name",
     "event_type",
+    "raw_title",
     "role",
     "event_date",
     "detected_at",
@@ -33,16 +34,25 @@ REQUIRED_COLUMNS = [
     "suggested_next_step",
     "source_url",
     "full_explanation",
+    "quality_score",
 ]
 
 # -----------------------------------------------------------------------------
 # Public RSS feeds (business / tech news). Swap or extend as needed.
 # -----------------------------------------------------------------------------
 RSS_FEEDS = [
+    # Tech / VC / startups
     "https://techcrunch.com/feed/",
     "https://venturebeat.com/feed/",
-    # Broad tech/business headlines (public RSS)
     "https://www.theverge.com/rss/index.xml",
+    "https://www.techmeme.com/feed.xml",
+    # Business & markets
+    "https://feeds.arstechnica.com/arstechnica/business",
+    "https://rss.cnn.com/rss/money_rss.xml",
+    "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
+    # Executive / leadership / funding (Google News search RSS — public HTML)
+    "https://news.google.com/rss/search?q=startup+funding+OR+CEO+appointment&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=board+of+directors+OR+executive+hire&hl=en-US&gl=US&ceid=US:en",
 ]
 
 # Browser-like User-Agent: some feeds block generic Python clients.
@@ -64,6 +74,7 @@ def outreach_angle_for_event_type(event_type: str) -> str:
         "Funding": "Congrats on raise — planning for future liquidity",
         "Promotion": "New role → comp and tax optimization",
         "Board Appointment": "New board role → expanding financial complexity",
+        "Other": "Broad finance or career headline — lead with context and curiosity",
     }
     return angles.get(et, "Acknowledge the news — offer relevant planning context.")
 
@@ -104,6 +115,7 @@ def why_it_matters_for_event_type(event_type: str) -> str:
         "Funding": "New funding can reshape equity, hiring, and future payout potential.",
         "Promotion": "Senior moves usually reflect expanded scope and compensation upside.",
         "Board Appointment": "Board roles can bring fees, equity, and strategic influence.",
+        "Other": "General business or markets news — may still be a timely reason to reach out.",
     }
     et = (event_type or "").strip()
     return blurbs.get(et, "Public career and finance news may signal changing wealth dynamics.")
@@ -132,7 +144,7 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = pd.NA
 
     # --- Strings: never NaN in the UI; trim whitespace ---
-    for col in ("person_name", "role", "source_url", "full_explanation"):
+    for col in ("person_name", "role", "source_url", "full_explanation", "raw_title"):
         out[col] = out[col].fillna("").astype(str).str.strip()
 
     out["company_name"] = out["company_name"].fillna("").astype(str).str.strip()
@@ -164,6 +176,9 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("outreach_angle", "priority_level", "suggested_next_step"):
         out[col] = out[col].fillna("").astype(str).str.strip()
 
+    # --- Quality score: ensure it's an int ---
+    out["quality_score"] = out["quality_score"].fillna(0).astype(int)
+
     # --- Dedupe URLs: keep the row with the highest score, then first occurrence ---
     if not out.empty and "source_url" in out.columns:
         out = out.sort_values(["score", "event_date"], ascending=[False, False], na_position="last")
@@ -183,28 +198,136 @@ def _strip_html(text: str) -> str:
     return re.sub(r"\s+", " ", no_tags).strip()
 
 
-def _event_type_from_title(title: str) -> str | None:
+def _finance_career_broad(title: str) -> bool:
     """
-    Guess event_type from headline keywords (case-insensitive).
+    Loose filter: likely finance, business, tech, or career-adjacent content.
+    Used to keep headlines as 'Other' when they do not match the four core buckets.
+    """
+    t = title.lower()
+    needles = (
+        "stock",
+        "market",
+        "investor",
+        "invest",
+        "investing",
+        "startup",
+        "venture",
+        "ceo",
+        "cfo",
+        "cto",
+        "coo",
+        "chief",
+        "executive",
+        "earnings",
+        "revenue",
+        "billion",
+        "million",
+        "ipo",
+        "economy",
+        "economic",
+        "bank",
+        "banking",
+        "equity",
+        "crypto",
+        "bitcoin",
+        "tech",
+        "technology",
+        "software",
+        "hardware",
+        "company",
+        "companies",
+        "corporate",
+        "layoff",
+        "layoffs",
+        "hiring",
+        "hire",
+        "merger",
+        "deal",
+        "deals",
+        "quarter",
+        "profit",
+        "loss",
+        "nasdaq",
+        "s&p",
+        "fund",
+        "funding",
+        "funded",
+        "unicorn",
+        "valuation",
+        "round",
+        "seed",
+        "google",
+        "microsoft",
+        "amazon",
+        "apple",
+        "meta",
+        "tesla",
+        "nvidia",
+        "openai",
+        "anthropic",
+        "ai ",
+        " ai",
+        "finance",
+        "financial",
+        "business",
+        "sales",
+        "growth",
+        "shareholder",
+        "share price",
+        "wall street",
+        "trading",
+        "sec ",
+        "regulator",
+        "acquisition",
+        "acquires",
+        "lawsuit",
+        "spinoff",
+        "dividend",
+        "bond",
+        "yield",
+        "inflation",
+        "tariff",
+        "trade",
+        "silicon",
+        "cloud",
+        "data center",
+        "founder",
+        "president",
+        "chair",
+        "chairman",
+        "partner",
+        "director",
+        "board",
+        "workforce",
+        "job cut",
+    )
+    return any(n in t for n in needles)
 
-    We check categories in priority order so stronger / more specific
-    signals win when multiple keywords could apply.
+
+def _classify_event_type(title: str) -> str | None:
+    """
+    Map headline → one of the four core types, 'Other', or None (skip).
+
+    Order: specific deal types first, then board vs promotion, then broad 'Other'.
     """
     t = title.lower()
 
-    # Founder Exit — acquisitions, sales, exits (headlines often say "acquires", "raises" is funding)
     for kw in (
         "acquired",
         "acquires",
         "acquisition",
-        "buys",  # e.g. "Company A buys Company B"
+        "buys",
+        "buyout",
+        "merger",
+        "takeover",
         "sold",
         "exit",
+        "divest",
+        "divests",
     ):
         if kw in t:
             return "Founder Exit"
 
-    # Funding — venture rounds (include "raises" — very common in tech headlines)
     for kw in (
         "raised",
         "raises",
@@ -213,21 +336,40 @@ def _event_type_from_title(title: str) -> str | None:
         "series b",
         "series c",
         "series d",
+        "series e",
         "seed round",
         "seed funding",
+        "venture round",
+        "unicorn",
+        "valuation",
+        "funding round",
     ):
         if kw in t:
             return "Funding"
 
-    # Board — before generic "appointed" so we prefer "director" / board roles
-    for kw in ("board", "director"):
+    for kw in ("board", "director", "boardroom"):
         if kw in t:
             return "Board Appointment"
 
-    # Promotion — leadership moves
-    for kw in ("promoted", "appointed", "named partner"):
+    for kw in (
+        "promoted",
+        "appointed",
+        "named partner",
+        "named ceo",
+        "named cfo",
+        "joins as",
+        "new role",
+        "executive shuffle",
+        "succession",
+        "stepping down",
+        "resigns",
+        "resignation",
+    ):
         if kw in t:
             return "Promotion"
+
+    if _finance_career_broad(title):
+        return "Other"
 
     return None
 
@@ -250,10 +392,11 @@ def _guess_person_name(title: str) -> str:
     """
     Very light extraction — many headlines won't match; that's OK (empty string).
     Looks for patterns like "Jane Doe joins ..." or "... names Jane Doe CEO".
+    Conservative: require exactly two capitalized words for names.
     """
     # "First Last joins|appointed|named|promoted"
     m = re.search(
-        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+(?:joins|appointed|named|promoted)\b",
+        r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s+(?:joins|appointed|named|promoted)\b",
         title,
     )
     if m:
@@ -261,7 +404,7 @@ def _guess_person_name(title: str) -> str:
 
     # "Company names Jane Doe as ..."
     m = re.search(
-        r"\b(?:names|names\s+as)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b",
+        r"\b(?:names|names\s+as)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)\b",
         title,
         re.I,
     )
@@ -293,8 +436,23 @@ def _guess_company_name(title: str) -> str:
             if rest and len(rest) < 120:
                 return rest
 
-    # "... at CompanyName ..." (weak signal)
+    # "... at CompanyName ..."
     m = re.search(r"\s+at\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
+    if m:
+        return m.group(1).strip()
+
+    # "... of CompanyName ..."
+    m = re.search(r"\s+of\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
+    if m:
+        return m.group(1).strip()
+
+    # "... joins CompanyName ..."
+    m = re.search(r"\s+joins\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
+    if m:
+        return m.group(1).strip()
+
+    # "... appointed to CompanyName board ..."
+    m = re.search(r"appointed\s+to\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)\s+board", t, re.I)
     if m:
         return m.group(1).strip()
 
@@ -309,21 +467,24 @@ def _guess_company_name(title: str) -> str:
 def _guess_role(title: str) -> str:
     """Optional role hint from title; empty if we can't tell."""
     t = title.lower()
-    for label in (
-        "ceo",
-        "cfo",
-        "cto",
-        "coo",
-        "chief",
-        "president",
-        "partner",
-        "director",
-        "chair",
-        "founder",
-    ):
-        if label in t:
-            # Return a short hint, not a full parse
-            return label.upper() if len(label) <= 4 else label.title()
+    role_map = {
+        "ceo": "CEO",
+        "cfo": "CFO",
+        "cto": "CTO",
+        "coo": "COO",
+        "chief": "Chief",
+        "president": "President",
+        "partner": "Partner",
+        "director": "Director",
+        "chair": "Chair",
+        "founder": "Founder",
+        "co-founder": "Co-Founder",
+        "board member": "Board Member",
+        "executive director": "Executive Director",
+    }
+    for phrase, label in role_map.items():
+        if phrase in t:
+            return label
     return ""
 
 
@@ -340,7 +501,12 @@ def _fetch_one_feed(url: str) -> list[Any]:
 
 
 def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
-    """Turn RSS entries into our row dicts (only items that match a keyword bucket)."""
+    """
+    Turn RSS entries into row dicts.
+
+    Keeps items that classify to a core type or 'Other'. Missing person_name / role
+    does not drop a row — those fields may stay empty.
+    """
     rows: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
 
@@ -349,7 +515,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         if not title:
             continue
 
-        event_type = _event_type_from_title(title)
+        event_type = _classify_event_type(title)
         if not event_type:
             continue
 
@@ -367,17 +533,29 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         company = _guess_company_name(title)
         role = _guess_role(title)
 
+        quality_score = 0
+        if person:
+            quality_score += 1
+        if company != "Unknown":
+            quality_score += 1
+        if role:
+            quality_score += 1
+        if event_type != "Other":
+            quality_score += 1
+
         rows.append(
             {
                 "person_name": person,
                 "company_name": company,
                 "event_type": event_type,
+                "raw_title": title,
                 "role": role,
                 "event_date": _parse_entry_date(entry),
                 "detected_at": datetime.now(timezone.utc),
                 "why_it_matters": why_it_matters_for_event_type(event_type),
                 "source_url": link,
                 "full_explanation": full_explanation[:4000],
+                "quality_score": quality_score,
             }
         )
 
@@ -394,6 +572,7 @@ def _raw_sample_signals() -> list[dict]:
             "person_name": "Alex Rivera",
             "company_name": "Northbeam Analytics",
             "event_type": "Founder Exit",
+            "raw_title": "Northbeam Analytics acquired in nine-figure strategic exit — Alex Rivera, Co-founder & CEO",
             "role": "Co-founder & CEO",
             "event_date": "2026-03-12",
             "why_it_matters": "Company acquisition often triggers liquidity for founders and early equity holders.",
@@ -403,11 +582,13 @@ def _raw_sample_signals() -> list[dict]:
                 "Founders often reinvest or take time off after an exit; this is a classic 'wealth signal' "
                 "for advisors and peers tracking career moves."
             ),
+            "quality_score": 4,
         },
         {
             "person_name": "Jordan Lee",
             "company_name": "Helio Robotics",
             "event_type": "Funding",
+            "raw_title": "Helio Robotics raises $120M Series B led by top-tier VCs",
             "role": "CTO",
             "event_date": "2026-02-28",
             "why_it_matters": "Large funding rounds can mean option refreshes, bonuses, or future liquidity events.",
@@ -416,11 +597,13 @@ def _raw_sample_signals() -> list[dict]:
                 "Venture funding is public when companies issue press releases. "
                 "Senior leaders may receive new equity grants tied to milestones after a round."
             ),
+            "quality_score": 4,
         },
         {
             "person_name": "Sam Patel",
             "company_name": "Crescent Health",
             "event_type": "Promotion",
+            "raw_title": "Crescent Health names Sam Patel SVP of Product in executive promotion",
             "role": "VP of Product → SVP",
             "event_date": "2026-03-01",
             "why_it_matters": "Senior promotions often coincide with compensation step-ups and equity band changes.",
@@ -429,11 +612,13 @@ def _raw_sample_signals() -> list[dict]:
                 "Companies frequently announce executive promotions via press releases. "
                 "These roles usually carry higher base, bonus, and long-term incentive weight."
             ),
+            "quality_score": 4,
         },
         {
             "person_name": "Taylor Kim",
             "company_name": "Meridian Bank",
             "event_type": "Board Appointment",
+            "raw_title": "Meridian Bank adds Taylor Kim as independent director to board",
             "role": "Independent Director",
             "event_date": "2026-01-20",
             "why_it_matters": "Board roles can include cash retainers, equity, and visibility into major decisions.",
@@ -442,11 +627,13 @@ def _raw_sample_signals() -> list[dict]:
                 "Public companies file board changes with regulators (e.g., 8-K). "
                 "Director compensation is disclosed in proxy statements for listed firms."
             ),
+            "quality_score": 4,
         },
         {
             "person_name": "Morgan Chen",
             "company_name": "Lumen Grid",
             "event_type": "Founder Exit",
+            "raw_title": "Lumen Grid founder Morgan Chen exits after strategic acquisition",
             "role": "Founder",
             "event_date": "2025-12-05",
             "why_it_matters": "Second-time founders often recycle capital into new ventures or angel investing.",
@@ -455,11 +642,13 @@ def _raw_sample_signals() -> list[dict]:
                 "Exit events are among the strongest signals because they can unlock significant personal liquidity, "
                 "subject to earn-outs and vesting."
             ),
+            "quality_score": 4,
         },
         {
             "person_name": "Riley Brooks",
             "company_name": "Atlas Security",
             "event_type": "Funding",
+            "raw_title": "Atlas Security closes $85M funding round to scale enterprise sales",
             "role": "Chief Revenue Officer",
             "event_date": "2026-03-18",
             "why_it_matters": "GTM leaders are often rewarded when the company raises capital to scale sales.",
@@ -468,11 +657,13 @@ def _raw_sample_signals() -> list[dict]:
                 "Funding news is often paired with hiring and expansion plans. "
                 "Commission and equity structures may change after a new round closes."
             ),
+            "quality_score": 4,
         },
         {
             "person_name": "Casey Nguyen",
             "company_name": "Harbor Freight AI",
             "event_type": "Promotion",
+            "raw_title": "Harbor Freight AI promotes Casey Nguyen to VP of Engineering",
             "role": "Director of Engineering → VP Engineering",
             "event_date": "2026-02-10",
             "why_it_matters": "VP-level promotions in tech usually reflect expanded scope and pay band.",
@@ -480,11 +671,13 @@ def _raw_sample_signals() -> list[dict]:
             "full_explanation": (
                 "Engineering leadership promotions are sometimes announced alongside product launches or reorgs."
             ),
+            "quality_score": 4,
         },
         {
             "person_name": "Jamie Foster",
             "company_name": "Silverline Retail",
             "event_type": "Board Appointment",
+            "raw_title": "Silverline Retail appoints investor board observer Jamie Foster",
             "role": "Board Observer (investor seat)",
             "event_date": "2026-03-04",
             "why_it_matters": "Investor board observers gain strategic insight and network leverage.",
@@ -492,15 +685,24 @@ def _raw_sample_signals() -> list[dict]:
             "full_explanation": (
                 "Board-related news can appear in specialty press or company blogs; always verify on primary sources."
             ),
+            "quality_score": 4,
         },
     ]
 
 
 def load_sample_signals() -> pd.DataFrame:
     """Load demo signals, score them, then normalize for the app."""
-    rows = apply_scores(_raw_sample_signals())
+    raw_list = _raw_sample_signals()
+    rows = apply_scores(raw_list)
     df = pd.DataFrame(rows)
-    return finalize_dataframe(df)
+    out = finalize_dataframe(df)
+    out.attrs["ingest_debug"] = {
+        "raw_rss_entries": len(raw_list),
+        "parsed_signal_rows": len(raw_list),
+        "rows_after_finalize": len(out),
+        "data_source": "sample_fallback",
+    }
+    return out
 
 
 def fetch_signals() -> pd.DataFrame:
@@ -508,9 +710,9 @@ def fetch_signals() -> pd.DataFrame:
     Load signals from public RSS feeds, then score and clean them.
 
     - If every feed fails or returns no entries: return load_sample_signals().
-    - If feeds load but no headline matches our keywords: return an empty table
-      (same columns) so the UI can show the empty state.
-    - On success: return cleaned rows from matching RSS items.
+    - If feeds return items but nothing classifies: empty dataframe with ingest_debug
+      (so you can see raw count vs parsed count — not hidden behind sample data).
+    - On success: rows from RSS with attrs['ingest_debug'] for pipeline transparency.
     """
     column_order = REQUIRED_COLUMNS
 
@@ -528,10 +730,21 @@ def fetch_signals() -> pd.DataFrame:
         return load_sample_signals()
 
     raw_rows = _rss_items_to_signals(all_entries)
+    ingest_debug: dict[str, Any] = {
+        "raw_rss_entries": len(all_entries),
+        "parsed_signal_rows": len(raw_rows),
+        "data_source": "rss",
+    }
+
     if not raw_rows:
-        # Fetch succeeded but no headlines matched our keywords — empty table (still valid)
-        return finalize_dataframe(pd.DataFrame(columns=column_order))
+        out = finalize_dataframe(pd.DataFrame(columns=column_order))
+        ingest_debug["rows_after_finalize"] = len(out)
+        out.attrs["ingest_debug"] = ingest_debug
+        return out
 
     scored = apply_scores(raw_rows)
     df = pd.DataFrame(scored)
-    return finalize_dataframe(df)
+    out = finalize_dataframe(df)
+    ingest_debug["rows_after_finalize"] = len(out)
+    out.attrs["ingest_debug"] = ingest_debug
+    return out
