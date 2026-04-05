@@ -52,6 +52,25 @@ SEARCHABLE_COLUMNS = (
     "billionaire_company",
     "priority_level",
     "full_explanation",
+    "prospect_quality",
+    "ai_why_flagged",
+    "ai_why_matters_fa",
+    "ai_cluster_fingerprint",
+    "cluster_group_id",
+    "ai_fa_usefulness_score",
+    "extracted_person_name",
+    "extracted_role",
+    "extracted_company",
+    "ai_net_worth_inferred",
+    "ai_wealth_estimate_confidence",
+    "ai_extraction_confidence",
+    "fa_prospect_identified",
+    "fa_structured_name",
+    "fa_relevance",
+    "fa_why_one_sentence",
+    "fa_priority_debug",
+    "fa_suppression_level",
+    "fa_suppression_reason",
 )
 
 # Company field: clear when it looks like a news outlet (substring match on normalized name)
@@ -66,6 +85,33 @@ BAD_PERSON_TOKENS = frozenset({"the", "a", "in", "on", "air force", "central ala
 def _fa_nonempty(val, *, fallback: str) -> str:
     t = str(val or "").strip()
     return t if t else fallback
+
+
+def _cell_str(val, *, default: str = "") -> str:
+    """Stringify a dataframe cell without ``pd.NA`` boolean ambiguity."""
+    if val is None:
+        return default
+    try:
+        if pd.isna(val):
+            return default
+    except (TypeError, ValueError):
+        return default
+    s = str(val).strip()
+    return s if s else default
+
+
+def _boolish(val) -> str:
+    """Yes/No for gate booleans that may be NA."""
+    if val is True:
+        return "yes"
+    if val is False:
+        return "no"
+    try:
+        if pd.isna(val):
+            return "no"
+    except (TypeError, ValueError):
+        pass
+    return "yes" if val else "no"
 
 
 def wealth_signal_for_display(r: pd.Series) -> str:
@@ -191,6 +237,14 @@ def prepare_explore_view(df: pd.DataFrame) -> pd.DataFrame:
             out[q] = 0
         else:
             out[q] = pd.to_numeric(out[q], errors="coerce").fillna(0)
+    if "ai_fa_usefulness_score" not in out.columns:
+        out["ai_fa_usefulness_score"] = 0
+    else:
+        out["ai_fa_usefulness_score"] = pd.to_numeric(out["ai_fa_usefulness_score"], errors="coerce").fillna(0)
+    if "prospect_quality" not in out.columns:
+        out["prospect_quality"] = ""
+    else:
+        out["prospect_quality"] = out["prospect_quality"].fillna("").astype(str)
     out["score"] = pd.to_numeric(out["score"], errors="coerce").fillna(0)
     if "wealth_rank" not in out.columns:
         out["wealth_rank"] = 3
@@ -200,11 +254,20 @@ def prepare_explore_view(df: pd.DataFrame) -> pd.DataFrame:
     out["wealth_signal_display"] = out.apply(wealth_signal_for_display, axis=1)
     out["liquidity_display"] = out.apply(liquidity_for_display, axis=1)
     out["_person_clear"] = (out["person_name"].fillna("").astype(str).str.strip() != "").astype(int)
-    out = out.sort_values(
-        by=["wealth_rank", "_person_clear", "event_date", "quality_score", "score"],
-        ascending=[True, False, False, False, False],
-        na_position="last",
-    )
+    sort_cols: list[str] = []
+    sort_asc: list[bool] = []
+    if "ai_rerank_priority" in out.columns:
+        out["ai_rerank_priority"] = pd.to_numeric(out["ai_rerank_priority"], errors="coerce")
+        if bool(out["ai_rerank_priority"].notna().any()):
+            sort_cols.append("ai_rerank_priority")
+            sort_asc.append(True)
+    if "ai_fa_usefulness_score" in out.columns:
+        out["ai_fa_usefulness_score"] = pd.to_numeric(out["ai_fa_usefulness_score"], errors="coerce").fillna(0)
+        sort_cols.append("ai_fa_usefulness_score")
+        sort_asc.append(False)
+    sort_cols.extend(["wealth_rank", "_person_clear", "event_date", "quality_score", "score"])
+    sort_asc.extend([True, False, False, False, False])
+    out = out.sort_values(by=sort_cols, ascending=sort_asc, na_position="last")
     return out.drop(columns=["_person_clear"], errors="ignore")
 
 
@@ -326,10 +389,16 @@ def ensure_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
     """Add missing columns with safe defaults (strings empty, numeric scores 0, event_date NaT)."""
     for col in columns:
         if col not in df.columns:
-            if col in ("score", "quality_score", "confidence_score", "wealth_rank"):
-                df[col] = 0 if col != "wealth_rank" else 3
+            if col == "wealth_rank":
+                df[col] = 3
+            elif col in ("score", "quality_score", "confidence_score", "ai_fa_usefulness_score", "ai_extraction_confidence"):
+                df[col] = 0
+            elif col == "ai_rerank_priority":
+                df[col] = pd.NA
             elif col in ("event_date", "detected_at"):
                 df[col] = pd.NaT
+            elif col.startswith("fa_pass_gate_"):
+                df[col] = False
             else:
                 df[col] = ""
 
@@ -338,7 +407,7 @@ def rank_for_hero_sections(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fallback ordering for Home: wealth-signal strength first, then event-type tier, then clarity.
 
-    Not used when AI re-ranking returns results. Outlet / source is not a ranking factor.
+    When AI re-ranking / usefulness scores exist, they take precedence (same keys as Explore).
     """
     if df is None or df.empty:
         return df
@@ -356,11 +425,20 @@ def rank_for_hero_sections(df: pd.DataFrame) -> pd.DataFrame:
     d["_ev"] = d["event_type"].map(EVENT_TYPE_RANK).fillna(0).astype(int)
     d["_pn"] = (d["person_name"].fillna("").str.strip() != "").astype(int)
     d["_cn"] = ((d["company_name"].fillna("").str.strip() != "") & (d["company_name"] != "Unknown")).astype(int)
-    d = d.sort_values(
-        by=["wealth_rank", "_pn", "event_date", "_ev", "quality_score", "score", "_cn"],
-        ascending=[True, False, False, False, False, False, False],
-        na_position="last",
-    )
+    sort_cols: list[str] = []
+    sort_asc: list[bool] = []
+    if "ai_rerank_priority" in d.columns:
+        d["ai_rerank_priority"] = pd.to_numeric(d["ai_rerank_priority"], errors="coerce")
+        if bool(d["ai_rerank_priority"].notna().any()):
+            sort_cols.append("ai_rerank_priority")
+            sort_asc.append(True)
+    if "ai_fa_usefulness_score" in d.columns:
+        d["ai_fa_usefulness_score"] = pd.to_numeric(d["ai_fa_usefulness_score"], errors="coerce").fillna(0)
+        sort_cols.append("ai_fa_usefulness_score")
+        sort_asc.append(False)
+    sort_cols.extend(["wealth_rank", "_pn", "event_date", "_ev", "quality_score", "score", "_cn"])
+    sort_asc.extend([True, False, False, False, False, False, False])
+    d = d.sort_values(by=sort_cols, ascending=sort_asc, na_position="last")
     return d.drop(columns=["_ev", "_pn", "_cn"], errors="ignore")
 
 
@@ -1108,6 +1186,30 @@ ensure_columns_present(
         "ai_liquidity_label",
         "ai_client_who",
         "ai_why_money",
+        "extracted_person_name",
+        "extracted_role",
+        "extracted_company",
+        "prospect_quality",
+        "ai_fa_usefulness_score",
+        "ai_rerank_priority",
+        "ai_why_flagged",
+        "ai_why_matters_fa",
+        "ai_cluster_fingerprint",
+        "cluster_group_id",
+        "ai_net_worth_inferred",
+        "ai_wealth_estimate_confidence",
+        "ai_extraction_confidence",
+        "fa_prospect_identified",
+        "fa_structured_name",
+        "fa_relevance",
+        "fa_why_one_sentence",
+        "fa_pass_gate_person",
+        "fa_pass_gate_wealth_substance",
+        "fa_pass_gate_liquidity_or_uhnw",
+        "fa_pass_gate_fa_relevance",
+        "fa_suppression_level",
+        "fa_suppression_reason",
+        "fa_priority_debug",
     ],
 )
 
@@ -1277,6 +1379,30 @@ ensure_columns_present(
         "ai_liquidity_label",
         "ai_client_who",
         "ai_why_money",
+        "extracted_person_name",
+        "extracted_role",
+        "extracted_company",
+        "prospect_quality",
+        "ai_fa_usefulness_score",
+        "ai_rerank_priority",
+        "ai_why_flagged",
+        "ai_why_matters_fa",
+        "ai_cluster_fingerprint",
+        "cluster_group_id",
+        "ai_net_worth_inferred",
+        "ai_wealth_estimate_confidence",
+        "ai_extraction_confidence",
+        "fa_prospect_identified",
+        "fa_structured_name",
+        "fa_relevance",
+        "fa_why_one_sentence",
+        "fa_pass_gate_person",
+        "fa_pass_gate_wealth_substance",
+        "fa_pass_gate_liquidity_or_uhnw",
+        "fa_pass_gate_fa_relevance",
+        "fa_suppression_level",
+        "fa_suppression_reason",
+        "fa_priority_debug",
     ],
 )
 
@@ -1403,8 +1529,13 @@ with tab_explore:
             st.metric("Highest score", hi if hi is not None else "-")
         with m3:
             if n_total:
-                modes = signals_df["event_type"].replace("", pd.NA).dropna().mode()
-                common = str(modes.iloc[0]) if len(modes) else "-"
+                et = signals_df["event_type"].replace("", pd.NA).dropna()
+                et = et[~et.astype(str).str.strip().str.lower().eq("other")]
+                if et.empty:
+                    common = "-"
+                else:
+                    modes = et.mode()
+                    common = str(modes.iloc[0]).strip() if len(modes) else "-"
             else:
                 common = "-"
             st.metric("Most common event type", common)
@@ -1422,6 +1553,8 @@ with tab_explore:
         "liquidity_display": "Liquidity event",
         "est_wealth_display": "Est. wealth (display)",
         "client_type": "Client type",
+        "prospect_quality": "Prospect quality",
+        "ai_fa_usefulness_score": "FA usefulness",
         "ai_summary": "AI summary",
     }
     _NARROW_COLS = [
@@ -1432,6 +1565,8 @@ with tab_explore:
         "liquidity_display",
         "est_wealth_display",
         "client_type",
+        "prospect_quality",
+        "ai_fa_usefulness_score",
         "ai_summary",
     ]
 
@@ -1439,7 +1574,7 @@ with tab_explore:
         """
     <div class="ws-section-head">
       <h2 class="ws-h2">Prospect table</h2>
-      <p class="ws-section-sub">Same columns as <strong>Details</strong> and the same filters as the sidebar. Sorted by wealth-signal strength, then whether the person is named, then recency—not by outlet.</p>
+      <p class="ws-section-sub">Same columns as <strong>Details</strong> and the same filters as the sidebar. Sorted by AI re-rank / usefulness when available, then wealth-signal strength, named person, and recency—not by outlet.</p>
     </div>
     """,
         unsafe_allow_html=True,
@@ -1495,6 +1630,17 @@ with tab_explore:
                     "Client type",
                     width="medium",
                     help="Founder, executive, investor, athlete, heir, etc.",
+                ),
+                "Prospect quality": st.column_config.TextColumn(
+                    "Prospect quality",
+                    width="small",
+                    help="AI tier: Excellent / Possible / Low-value / Not actionable.",
+                ),
+                "FA usefulness": st.column_config.NumberColumn(
+                    "FA usefulness",
+                    width="small",
+                    help="0–100: how useful this article is for advisor prospecting (AI decision layer).",
+                    format="%d",
                 ),
                 "AI summary": st.column_config.TextColumn(
                     "AI summary",
@@ -1600,6 +1746,73 @@ with tab_explore:
 
                         st.markdown(f"**Client type:** {client_type_for_display(row)}")
                         st.caption("Advisor archetype: founder, executive, investor, athlete, heir, or unknown.")
+
+                        st.markdown("##### FA priority (hard gates)")
+                        st.markdown(f"**Prospect identified:** {_cell_str(row.get('fa_prospect_identified'))}")
+                        st.markdown(f"**Structured name:** {_cell_str(row.get('fa_structured_name'))}")
+                        st.markdown(f"**Wealth signal (rules):** {_cell_str(row.get('wealth_signal_label'))}")
+                        st.markdown(f"**Liquidity event (rules):** {_cell_str(row.get('liquidity_event'))}")
+                        st.markdown(f"**FA relevance:** {_cell_str(row.get('fa_relevance'))}")
+                        st.markdown(f"**Why it matters (one line):** {_cell_str(row.get('fa_why_one_sentence'))}")
+                        _gp = row.get("fa_pass_gate_person")
+                        _gw = row.get("fa_pass_gate_wealth_substance")
+                        _gl = row.get("fa_pass_gate_liquidity_or_uhnw")
+                        _gf = row.get("fa_pass_gate_fa_relevance")
+                        st.caption(
+                            f"Gates passed — person: {_boolish(_gp)}; wealth substance: {_boolish(_gw)}; "
+                            f"liquidity / UHNW: {_boolish(_gl)}; FA relevance High: {_boolish(_gf)}"
+                        )
+                        _sup = _cell_str(row.get("fa_suppression_level"))
+                        if _sup and _sup != "none":
+                            st.caption(
+                                f"Suppression: **{_sup}** — {_cell_str(row.get('fa_suppression_reason'))}"
+                            )
+                        _dbg = _cell_str(row.get("fa_priority_debug"))
+                        if _dbg:
+                            st.caption("Priority debug (which rules fired)")
+                            st.code(_dbg, language=None)
+
+                        st.markdown("##### AI extraction & advisor ranking")
+                        _pq = _cell_str(row.get("prospect_quality"))
+                        if _pq:
+                            st.markdown(f"**Prospect quality (AI):** {_pq}")
+                        _fus = pd.to_numeric(row.get("ai_fa_usefulness_score"), errors="coerce")
+                        if pd.notna(_fus):
+                            st.markdown(f"**Usefulness for FA (0–100):** {int(_fus)}")
+                        _rp = row.get("ai_rerank_priority")
+                        if pd.notna(_rp):
+                            st.markdown(f"**AI re-rank order:** {int(pd.to_numeric(_rp, errors='coerce') or 0)}")
+                        _wf = _cell_str(row.get("ai_why_flagged"))
+                        if _wf:
+                            st.markdown(f"**Why flagged:** {_wf}")
+                        _wm = _cell_str(row.get("ai_why_matters_fa"))
+                        if _wm:
+                            st.markdown(f"**Why it matters for an advisor:** {_wm}")
+                        _cg = row.get("cluster_group_id")
+                        _cg_s = _cell_str(_cg)
+                        if _cg_s:
+                            st.caption(f"Cluster / dedupe group: {_cg_s}")
+                        _exn = _cell_str(row.get("extracted_person_name"))
+                        _exr = _cell_str(row.get("extracted_role"))
+                        _exc = _cell_str(row.get("extracted_company"))
+                        if _exn or _exr or _exc:
+                            st.caption("Structured extraction (may align with primary fields when confidence is high).")
+                            if _exn:
+                                st.markdown(f"**Structured name:** {_exn}")
+                            if _exr:
+                                st.markdown(f"**Structured role:** {_exr}")
+                            if _exc:
+                                st.markdown(f"**Structured company:** {_exc}")
+                        _nw_inf = row.get("ai_net_worth_inferred")
+                        _wec = _cell_str(row.get("ai_wealth_estimate_confidence")).lower()
+                        if pd.notna(_nw_inf) and str(_nw_inf).strip() != "" and _wec not in ("none", ""):
+                            st.markdown(
+                                f"**Net worth (AI inferred):** {format_wealth(_nw_inf)} "
+                                f"(estimate confidence: {_wec or '—'})"
+                            )
+                        _exconf = pd.to_numeric(row.get("ai_extraction_confidence"), errors="coerce")
+                        if pd.notna(_exconf) and int(_exconf) > 0:
+                            st.caption(f"Field extraction confidence: {int(_exconf)}")
 
                         st.markdown(f"**Why it matters:** {_fa_nonempty(row.get('why_it_matters'), fallback='Data pending')}")
 

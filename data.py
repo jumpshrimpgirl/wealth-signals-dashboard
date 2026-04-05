@@ -20,7 +20,8 @@ import pandas as pd
 import requests
 
 from ai_extraction import extract_signal_with_ai
-from ai_interpretation import enrich_dataframe_with_ai_interpretation
+from ai_decision import enrich_dataframe_with_ai_decision
+from fa_gating import compute_fa_gating_row
 from person_validation import is_valid_person
 from score import (
     apply_scores,
@@ -29,7 +30,6 @@ from score import (
     classify_liquidity_event,
     classify_wealth_signal_strength,
     compute_signal_score,
-    derive_wealth_priority_level,
     infer_source_of_wealth,
     is_macro_noise_without_wealth_hook,
     passes_wealth_high_priority_gate,
@@ -93,6 +93,34 @@ REQUIRED_COLUMNS = [
     "ai_liquidity_label",
     "ai_client_who",
     "ai_why_money",
+    "extracted_person_name",
+    "extracted_role",
+    "extracted_company",
+    "ai_decision_client_type",
+    "ai_decision_wealth_signal",
+    "ai_decision_liquidity",
+    "ai_decision_source_of_wealth",
+    "ai_net_worth_inferred",
+    "ai_wealth_estimate_confidence",
+    "ai_extraction_confidence",
+    "prospect_quality",
+    "ai_fa_usefulness_score",
+    "ai_why_flagged",
+    "ai_why_matters_fa",
+    "ai_cluster_fingerprint",
+    "ai_rerank_priority",
+    "cluster_group_id",
+    "fa_prospect_identified",
+    "fa_structured_name",
+    "fa_relevance",
+    "fa_why_one_sentence",
+    "fa_pass_gate_person",
+    "fa_pass_gate_wealth_substance",
+    "fa_pass_gate_liquidity_or_uhnw",
+    "fa_pass_gate_fa_relevance",
+    "fa_suppression_level",
+    "fa_suppression_reason",
+    "fa_priority_debug",
 ]
 
 # -----------------------------------------------------------------------------
@@ -311,6 +339,11 @@ RSS_FEEDS = [
     "https://www.economist.com/business/rss.xml",
     # Bloomberg
     "https://feeds.bloomberg.com/markets/news.rss",
+    # Additional global business / markets (same pipeline + FA hard gates apply)
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "https://www.marketwatch.com/rss/topstories",
+    "https://www.theguardian.com/uk/business/rss",
+    "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
 ]
 
 # Browser-like User-Agent: some feeds block generic Python clients.
@@ -2528,11 +2561,27 @@ def _is_relevant_signal(
     return _article_row_should_keep(text_blob, person_name, company_name)
 
 
+def _row_weak_signal_bool(v: Any) -> bool:
+    """Safe bool for ``weak_signal`` when the value may be NA from pandas."""
+    if v is True:
+        return True
+    if v is False:
+        return False
+    try:
+        if pd.isna(v):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return str(v).lower() in ("true", "1", "yes")
+
+
 def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
     """
-    Populate wealth-signal fields and ``priority_level`` from HNWI / liquidity rules.
+    Populate wealth-signal fields and ``priority_level`` from HNWI / liquidity rules
+    plus **hard FA gating** (identifiable prospect, wealth substance, suppression of generic news).
 
-    HIGH priority requires ``passes_wealth_high_priority_gate`` (has / made / about to make money).
+    High priority never relies on outlet prestige; it requires named prospects and clear FA relevance
+    (see ``fa_gating.compute_fa_gating_row``).
     """
     if out.empty:
         return
@@ -2567,7 +2616,7 @@ def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
             linked_wealth_signal=bool(r.get("linked_wealth_signal", False)),
             funding_amount=str(r.get("funding_amount", "")),
             funding_stage=str(r.get("funding_stage", "")),
-            weak_signal=bool(r.get("weak_signal", False)),
+            weak_signal=_row_weak_signal_bool(r.get("weak_signal", False)),
         )
         liq = classify_liquidity_event(
             str(r.get("event_type", "")),
@@ -2594,14 +2643,23 @@ def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
             sow = sh
         wr = wealth_signal_rank(strength)
         sc = int(pd.to_numeric(r.get("score"), errors="coerce") or 0)
-        pl = derive_wealth_priority_level(
-            score=sc,
-            passes_gate=gate,
+        fr = compute_fa_gating_row(
+            raw_title=str(r.get("raw_title", "")),
+            full_explanation=str(r.get("full_explanation", "")),
+            person_name=str(r.get("person_name", "")),
+            additional_people=r.get("additional_people"),
+            event_type=str(r.get("event_type", "")),
+            role=str(r.get("role", "")),
+            client_type=ctype,
             strength=strength,
             liquidity=liq,
+            passes_wealth_gate=gate,
             macro_noise=macro,
-            weak_signal=bool(r.get("weak_signal", False)),
+            weak_signal=_row_weak_signal_bool(r.get("weak_signal", False)),
             is_billionaire=bool(r.get("is_billionaire", False)),
+            score=sc,
+            estimated_wealth=float(r.get("estimated_wealth") or 0),
+            aggregated_estimated_wealth=float(r.get("aggregated_estimated_wealth") or 0),
         )
         out.at[idx, "wealth_passes_gate"] = bool(gate)
         out.at[idx, "wealth_signal_label"] = strength
@@ -2609,7 +2667,30 @@ def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
         out.at[idx, "client_type"] = ctype
         out.at[idx, "source_of_wealth"] = sow
         out.at[idx, "wealth_rank"] = int(wr)
-        out.at[idx, "priority_level"] = pl
+        out.at[idx, "priority_level"] = fr.priority_level
+        out.at[idx, "fa_prospect_identified"] = fr.fa_prospect_identified
+        out.at[idx, "fa_structured_name"] = fr.fa_structured_name
+        out.at[idx, "fa_relevance"] = fr.fa_relevance
+        out.at[idx, "fa_why_one_sentence"] = fr.fa_why_one_sentence
+        out.at[idx, "fa_pass_gate_person"] = bool(fr.fa_pass_gate_person)
+        out.at[idx, "fa_pass_gate_wealth_substance"] = bool(fr.fa_pass_gate_wealth_substance)
+        out.at[idx, "fa_pass_gate_liquidity_or_uhnw"] = bool(fr.fa_pass_gate_liquidity_or_uhnw)
+        out.at[idx, "fa_pass_gate_fa_relevance"] = bool(fr.fa_pass_gate_fa_relevance)
+        out.at[idx, "fa_suppression_level"] = fr.suppression_level
+        out.at[idx, "fa_suppression_reason"] = fr.suppression_reason
+        out.at[idx, "fa_priority_debug"] = fr.fa_priority_debug
+
+
+def refresh_derived_wealth_after_ai_decision(out: pd.DataFrame) -> pd.DataFrame:
+    """Recompute rank, display wealth, and priority after AI decision layer mutates labels and estimates."""
+    if out is None or out.empty:
+        return out
+    if "estimated_wealth" in out.columns:
+        out["est_wealth_display"] = out["estimated_wealth"].map(format_wealth)
+    if "wealth_signal_label" in out.columns:
+        out["wealth_rank"] = out["wealth_signal_label"].map(lambda s: wealth_signal_rank(str(s)))
+    _apply_wealth_signal_metadata(out)
+    return out
 
 
 def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -3031,9 +3112,9 @@ def _article_row_should_keep(blob: str, person_name: str, company_name: str) -> 
 
 
 def _weak_signal_score_from_url(source_url: str) -> int:
-    """Stable score in [30, 50] from URL (weak-signal band)."""
-    h = hashlib.sha256(str(source_url or "").encode()).hexdigest()
-    return 30 + (int(h[:12], 16) % 21)
+    """Weak-signal band score — fixed (no URL hash / outlet-based spread)."""
+    del source_url
+    return 40
 
 
 def _classify_event_type(title: str) -> str | None:
@@ -3725,7 +3806,8 @@ def load_sample_signals() -> pd.DataFrame:
     rows = apply_scores(raw_list)
     df = pd.DataFrame(rows)
     out = finalize_dataframe(df)
-    out = enrich_dataframe_with_ai_interpretation(out)
+    out = enrich_dataframe_with_ai_decision(out)
+    out = refresh_derived_wealth_after_ai_decision(out)
     out.attrs["ingest_debug"] = {
         "raw_rss_entries": len(raw_list),
         "parsed_signal_rows": len(raw_list),
@@ -3768,7 +3850,8 @@ def fetch_signals() -> pd.DataFrame:
 
     if not raw_rows:
         out = finalize_dataframe(pd.DataFrame(columns=column_order))
-        out = enrich_dataframe_with_ai_interpretation(out)
+        out = enrich_dataframe_with_ai_decision(out)
+        out = refresh_derived_wealth_after_ai_decision(out)
         ingest_debug["rows_after_finalize"] = len(out)
         out.attrs["ingest_debug"] = ingest_debug
         return out
@@ -3776,7 +3859,8 @@ def fetch_signals() -> pd.DataFrame:
     scored = apply_scores(raw_rows)
     df = pd.DataFrame(scored)
     out = finalize_dataframe(df)
-    out = enrich_dataframe_with_ai_interpretation(out)
+    out = enrich_dataframe_with_ai_decision(out)
+    out = refresh_derived_wealth_after_ai_decision(out)
     ingest_debug["rows_after_finalize"] = len(out)
     out.attrs["ingest_debug"] = ingest_debug
     return out
