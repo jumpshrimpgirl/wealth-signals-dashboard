@@ -349,7 +349,6 @@ def score_private_company_context(
     cross_check_result: dict[str, Any],
 ) -> dict[str, Any]:
     """0–15: private / bootstrap / thin-team scale; folded into founder cap with score_founder_wealth_creation."""
-    del cross_check_result
     t = (article_text or "").lower()
     s = 0
     rs: list[str] = []
