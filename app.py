@@ -27,6 +27,15 @@ EVENT_TYPE_RANK = {
 }
 
 
+def is_valid_person(name):
+    return (
+        isinstance(name, str)
+        and len(name.split()) >= 2
+        and all(word[0].isupper() for word in name.split() if word)
+        and not any(bad in name for bad in ["City", "County", "Startup", "Company", "News", "Daily"])
+    )
+
+
 def ensure_required_signal_columns(df: pd.DataFrame) -> None:
     """Guarantee core columns exist so filters and hero sections never KeyError."""
     for col in ["person_name", "company_name", "role", "event_type", "score"]:
@@ -609,7 +618,7 @@ min_score = st.sidebar.slider(
     min_value=0,
     max_value=100,
     value=0,
-    help="Lower this if the table looks empty - 'Other' scores 55 by default.",
+    help="Shown rows require score ≥ max(slider, 50).",
 )
 
 sort_by = st.sidebar.radio(
@@ -683,7 +692,7 @@ else:
 if not show_other:
     filtered = filtered[filtered["event_type"] != "Other"]
 
-filtered = filtered[filtered["score"] >= min_score]
+filtered = filtered[filtered["score"] >= max(min_score, 50)]
 
 if search_q:
     pn = filtered.get("person_name", pd.Series([""] * len(filtered))).fillna("").str.lower()
@@ -757,6 +766,7 @@ with st.container(border=True, key="ws_card_priority"):
         high_only = high_only[high_only["quality_score"] >= 5]
         high_only = high_only[~((high_only["event_type"] == "Other") & (high_only["quality_score"] < 6))]
         high_only = high_only[~((high_only["person_name"] == "") & (high_only["company_name"] == "Unknown"))]
+        high_only = high_only[high_only["person_name"].apply(is_valid_person)]
         top_high = rank_for_hero_sections(high_only).head(5)
 
     if len(signals_df) > 0 and len(top_high) == 0:
@@ -839,6 +849,7 @@ else:
         in_week = in_week[in_week["quality_score"] >= 5]
         in_week = in_week[~((in_week["event_type"] == "Other") & (in_week["quality_score"] < 6))]
         in_week = in_week[~((in_week["person_name"] == "") & (in_week["company_name"] == "Unknown"))]
+        in_week = in_week[in_week["person_name"].apply(is_valid_person)]
         top_week = rank_for_hero_sections(in_week).head(5)
         used_week_fallback = False
     else:
@@ -846,6 +857,7 @@ else:
         overall = overall[overall["quality_score"] >= 5]
         overall = overall[~((overall["event_type"] == "Other") & (overall["quality_score"] < 6))]
         overall = overall[~((overall["person_name"] == "") & (overall["company_name"] == "Unknown"))]
+        overall = overall[overall["person_name"].apply(is_valid_person)]
         top_week = rank_for_hero_sections(overall).head(5)
         used_week_fallback = True
 
