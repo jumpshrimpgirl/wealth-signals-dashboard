@@ -8,6 +8,7 @@ Run: streamlit run app.py
 
 import html
 import json
+import os
 from datetime import date, datetime, timezone
 
 import pandas as pd
@@ -621,6 +622,210 @@ def event_type_badge_html(event_type: str) -> str:
     return f'<span class="ws-badge ws-badge--low">{html.escape(et)}</span>'
 
 
+def _ai_ranking_enabled() -> bool:
+    return os.environ.get("WEALTH_SIGNALS_AI_RANKING", "1").lower() not in ("0", "false", "no")
+
+
+def rank_signals_with_ai(df: pd.DataFrame) -> list[dict]:
+    """
+    Advisor-style ordering: pick the best HOME_TOP_SIGNALS opportunities from the top 20 by score.
+
+    Returns a list of dicts (best → worst). Does **not** read or write pipeline scores — ranking only.
+    On failure or missing API, returns [] so the caller falls back to score sort.
+    """
+    if df is None or df.empty:
+        return []
+    if not _ai_ranking_enabled() or not os.environ.get("OPENAI_API_KEY", "").strip():
+        return []
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return []
+    if "score" not in df.columns:
+        return []
+
+    candidates = df.sort_values("score", ascending=False).head(20).reset_index(drop=True)
+    if candidates.empty:
+        return []
+
+    signals: list[dict] = []
+    for _, row in candidates.iterrows():
+        try:
+            ew = float(row.get("estimated_wealth") or 0)
+        except (TypeError, ValueError):
+            ew = 0.0
+        try:
+            agg = float(row.get("aggregated_estimated_wealth") or 0)
+        except (TypeError, ValueError):
+            agg = 0.0
+        nw = agg if agg > 0 else ew
+        signals.append(
+            {
+                "person": str(row.get("person_name", "") or ""),
+                "company": str(row.get("company_name", "") or ""),
+                "event": str(row.get("event_type", "") or ""),
+                "title": str(row.get("raw_title", "") or ""),
+                "score": int(row.get("score") or 0),
+                "net_worth": round(nw, 0),
+                "source_url": str(row.get("source_url", "") or ""),
+            }
+        )
+
+    k = min(HOME_TOP_SIGNALS, len(signals))
+    if k < 1:
+        return []
+    if k == 1:
+        return [signals[0]]
+
+    payload = json.dumps(signals, indent=2)
+    prompt = f"""You are a top financial advisor targeting $5M+ clients.
+
+From this list of signals, select the BEST {k} outreach opportunities.
+
+Rules:
+- Prioritize liquidity events (exits, funding, promotions)
+- Prioritize wealthy individuals (use net_worth as a hint)
+- Ignore irrelevant or macro-only news
+- Ignore journalists, locations, governments as the primary "person"
+- Prefer real individuals with plausible money movement
+
+Return a JSON object with a single key "ranked" whose value is an array of exactly {k} objects.
+Each object must include these keys copied exactly from the chosen rows in the list below:
+person, company, event, title, score, net_worth, source_url
+Order the array best opportunity first, worst last. Do not change numeric scores.
+
+Signals:
+{payload}
+"""
+
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "").strip())
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+    except Exception as e:
+        print("AI ranking failed:", e)
+        return []
+
+    raw_content = (response.choices[0].message.content or "").strip()
+    if not raw_content:
+        return []
+
+    try:
+        data = json.loads(raw_content)
+    except json.JSONDecodeError:
+        return []
+
+    ranked = data.get("ranked") if isinstance(data, dict) else None
+    if not isinstance(ranked, list):
+        return []
+
+    allowed = {str(s.get("source_url") or "").strip() for s in signals if s.get("source_url")}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for obj in ranked:
+        if not isinstance(obj, dict):
+            continue
+        u = str(obj.get("source_url") or "").strip()
+        if u and u in allowed and u not in seen:
+            out.append(
+                {
+                    "person": str(obj.get("person", "") or ""),
+                    "company": str(obj.get("company", "") or ""),
+                    "event": str(obj.get("event", "") or ""),
+                    "title": str(obj.get("title", "") or ""),
+                    "score": obj.get("score", 0),
+                    "net_worth": obj.get("net_worth", 0),
+                    "source_url": u,
+                }
+            )
+            seen.add(u)
+        if len(out) >= k:
+            break
+
+    if len(out) < k:
+        for s in signals:
+            if len(out) >= k:
+                break
+            u = str(s.get("source_url") or "").strip()
+            if u and u not in seen:
+                out.append(s)
+                seen.add(u)
+
+    return out[:k]
+
+
+def lookup_home_row_for_ai(df: pd.DataFrame, item: dict) -> pd.Series | None:
+    """Map an AI-ranked dict back to a full dataframe row when source_url / title match."""
+    if df is None or df.empty or not item:
+        return None
+    url = str(item.get("source_url") or "").strip()
+    if url and "source_url" in df.columns:
+        m = df[df["source_url"].astype(str).str.strip() == url]
+        if len(m):
+            return m.iloc[0]
+    person = str(item.get("person") or "").strip()
+    title = str(item.get("title") or "").strip()
+    if person and title and "person_name" in df.columns and "raw_title" in df.columns:
+        m = df[
+            (df["person_name"].astype(str).str.strip() == person)
+            & (df["raw_title"].astype(str).str.strip() == title)
+        ]
+        if len(m):
+            return m.iloc[0]
+    return None
+
+
+def render_home_signal_card(row: pd.Series) -> None:
+    """Rich card for Home tab (badges, links, AI lines when present)."""
+    header_line = format_signal_header_line(row)
+    hl = html.escape(header_line)
+    _line = str(row.get("ai_summary", "") or "").strip() or str(row.get("outreach_angle", "") or "")
+    out_e = html.escape(_line)
+    new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
+    ago = human_time_ago(row.get("detected_at"))
+    href = safe_href(str(row.get("source_url", "")))
+    with st.container(border=True):
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.markdown(
+                f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(row.get("priority_level", ""))} | Score: {int(row.get("score", 0) or 0)} | {out_e}</p>""",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""<p class="ws-card-meta">Detected {html.escape(ago)}</p>""",
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.markdown(
+                f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{int(row.get("score", 0) or 0)}</p>""",
+                unsafe_allow_html=True,
+            )
+        _cap = str(row.get("ai_outreach", "") or "").strip() or str(row.get("suggested_next_step", "") or "")
+        st.caption(_cap)
+        st.markdown(
+            f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
+            unsafe_allow_html=True,
+        )
+
+
+def render_home_signal_card_simple(item: dict) -> None:
+    """Fallback when a ranked dict cannot be joined to the dataframe."""
+    with st.container(border=True):
+        st.write(f"{item.get('person', '')} @ {item.get('company', '')}")
+        st.write(item.get("title", ""))
+        st.write(f"Score: {item.get('score', '')}")
+        st.markdown("---")
+
+
 # -----------------------------------------------------------------------------
 # Page setup
 # -----------------------------------------------------------------------------
@@ -651,6 +856,9 @@ ensure_columns_present(
         "suggested_next_step",
         "why_it_matters",
         "full_explanation",
+        "ai_summary",
+        "ai_why_it_matters",
+        "ai_outreach",
     ],
 )
 
@@ -707,7 +915,7 @@ min_score = st.sidebar.slider(
     min_value=0,
     max_value=100,
     value=TOP_CURATED_MIN_SCORE,
-    help=f"Applies to Home top {HOME_TOP_SIGNALS}, All signals, and Details. Home also prefers score ≥ {TOP_CURATED_MIN_SCORE} when picking highlights.",
+    help=f"Applies to Home top {HOME_TOP_SIGNALS}, All signals, and Details. Home ranks from the filtered list (AI re-orders among top 20 by score when enabled).",
 )
 
 sort_by = st.sidebar.radio(
@@ -770,6 +978,9 @@ ensure_columns_present(
         "suggested_next_step",
         "why_it_matters",
         "full_explanation",
+        "ai_summary",
+        "ai_why_it_matters",
+        "ai_outreach",
     ],
 )
 
@@ -846,7 +1057,7 @@ with tab_home:
             f"""
 <div class="ws-section-head">
   <h2 class="ws-h2">Top signals</h2>
-  <p class="ws-section-sub">Up to <strong>{HOME_TOP_SIGNALS}</strong> highlights: score ≥ {TOP_CURATED_MIN_SCORE}, ranked for outreach (uses sidebar filters).</p>
+  <p class="ws-section-sub">Up to <strong>{HOME_TOP_SIGNALS}</strong> from your <strong>current filters</strong> (sidebar). AI picks the best {HOME_TOP_SIGNALS} among the top 20 by score when the API is enabled; otherwise pure score order. Scoring is unchanged.</p>
 </div>
 """,
             unsafe_allow_html=True,
@@ -854,51 +1065,21 @@ with tab_home:
 
         if len(signals_df) == 0:
             st.info("No signals loaded yet - try **Refresh data**.")
-            top_home = signals_df.iloc[:0]
         elif len(filtered) == 0:
             st.info("No rows match your filters - widen event types or lower the minimum score, or open **Explore & data**.")
-            top_home = filtered.iloc[:0]
         else:
-            high_only = filtered[filtered["score"] >= TOP_CURATED_MIN_SCORE].copy()
-            top_home = rank_for_hero_sections(high_only).head(HOME_TOP_SIGNALS)
-
-        if len(signals_df) > 0 and len(filtered) > 0 and len(top_home) == 0:
-            st.info(
-                f"No signals at **score ≥ {TOP_CURATED_MIN_SCORE}** with current filters. Lower the sidebar minimum score or clear search."
-            )
-        elif len(top_home) > 0:
-            for i, (_, row) in enumerate(top_home.iterrows()):
-                header_line = format_signal_header_line(row)
-                hl = html.escape(header_line)
-                out_e = html.escape(str(row.get("outreach_angle", "")))
-                new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
-                ago = human_time_ago(row.get("detected_at"))
-                href = safe_href(str(row.get("source_url", "")))
-                with st.container(border=True):
-                    c1, c2 = st.columns([3, 1])
-                    with c1:
-                        st.markdown(
-                            f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(row.get("priority_level", ""))} | Score: {int(row.get("score", 0) or 0)} | {out_e}</p>""",
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f"""<p class="ws-card-meta">Detected {html.escape(ago)}</p>""",
-                            unsafe_allow_html=True,
-                        )
-                    with c2:
-                        st.markdown(
-                            f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{int(row.get("score", 0) or 0)}</p>""",
-                            unsafe_allow_html=True,
-                        )
-                    st.caption(row.get("suggested_next_step", ""))
-                    st.markdown(
-                        f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
-                        unsafe_allow_html=True,
-                    )
+            ranked_signals = rank_signals_with_ai(filtered)
+            if not ranked_signals:
+                top_home = filtered.sort_values("score", ascending=False).head(HOME_TOP_SIGNALS)
+                for _, row in top_home.iterrows():
+                    render_home_signal_card(row)
+            else:
+                for item in ranked_signals:
+                    row = lookup_home_row_for_ai(filtered, item)
+                    if row is not None:
+                        render_home_signal_card(row)
+                    else:
+                        render_home_signal_card_simple(item)
     st.caption(f"Full feed, search, and row details are on the **Explore & data** tab.")
 
 with tab_explore:
@@ -945,6 +1126,7 @@ with tab_explore:
         "target_client",
         "priority_level",
         "outreach_angle",
+        "ai_summary",
         "why_it_matters",
         "source_url",
         "quality_score",
@@ -1041,6 +1223,7 @@ with tab_explore:
                 "target_client": st.column_config.TextColumn("Target", width="small"),
                 "priority_level": st.column_config.TextColumn("Priority", width="small"),
                 "outreach_angle": st.column_config.TextColumn("Outreach angle", width="large"),
+                "ai_summary": st.column_config.TextColumn("AI summary", width="large"),
                 "why_it_matters": st.column_config.TextColumn("Why it matters", width="large"),
                 "Detected": st.column_config.TextColumn("Detected", width="small"),
                 "source_url": st.column_config.LinkColumn("Source", width="medium"),
@@ -1153,7 +1336,21 @@ with tab_explore:
                         st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
                         st.markdown(f"**Priority:** {row.get('priority_level', '')}")
                         st.markdown(f"**Detected:** {det}")
-                        st.markdown(f"**Outreach suggestion:** {row.get('outreach_angle', '')}")
+                        _ai_s = str(row.get("ai_summary", "") or "").strip()
+                        _ai_w = str(row.get("ai_why_it_matters", "") or "").strip()
+                        _ai_o = str(row.get("ai_outreach", "") or "").strip()
+                        if _ai_s or _ai_w or _ai_o:
+                            st.markdown("**AI (advisor context)**")
+                            if _ai_s:
+                                st.markdown(f"**Summary:** {_ai_s}")
+                            if _ai_w:
+                                st.markdown(f"**Why it matters:** {_ai_w}")
+                            if _ai_o:
+                                st.markdown(f"**Outreach angle:** {_ai_o}")
+                            st.markdown("---")
+                        st.markdown(
+                            f"**Outreach (template):** {row.get('outreach_angle', '')}"
+                        )
                         st.markdown(f"**Suggested next step:** {row.get('suggested_next_step', '')}")
                         st.markdown("---")
                         st.markdown(f"**Role:** {row.get('role') or '-'}")
@@ -1178,7 +1375,7 @@ with tab_explore:
                             f"linked wealth signal = {bool(row.get('linked_wealth_signal'))} | "
                             f"repeat company = {bool(row.get('repeat_company'))}"
                         )
-                        st.markdown("**Why it matters**")
+                        st.markdown("**Why it matters (baseline)**")
                         st.write(row.get("why_it_matters", ""))
                         st.markdown("**Full explanation**")
                         st.write(row.get("full_explanation") or "-")

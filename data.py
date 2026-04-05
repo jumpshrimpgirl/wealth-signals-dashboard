@@ -20,6 +20,7 @@ import pandas as pd
 import requests
 
 from ai_extraction import extract_signal_with_ai
+from ai_interpretation import enrich_dataframe_with_ai_interpretation
 from person_validation import is_valid_person
 from score import apply_scores, clamp_score_0_100, compute_signal_score
 
@@ -49,11 +50,15 @@ REQUIRED_COLUMNS = [
     "outreach_angle",
     "priority_level",
     "suggested_next_step",
+    "ai_summary",
+    "ai_why_it_matters",
+    "ai_outreach",
     "source_url",
     "full_explanation",
     "quality_score",
     "confidence_score",
     "is_relevant",
+    "weak_signal",
     "wealth_score",
     "estimated_wealth",
     "aggregated_estimated_wealth",
@@ -272,29 +277,17 @@ def _apply_value_priority_tags(out: pd.DataFrame) -> None:
 # Public RSS feeds (business / tech news). Swap or extend as needed.
 # -----------------------------------------------------------------------------
 RSS_FEEDS = [
-    # Core
-    "https://techcrunch.com/feed/",
-    "https://venturebeat.com/feed/",
+    # BBC
+    "http://feeds.bbci.co.uk/news/business/rss.xml",
+    "http://feeds.bbci.co.uk/news/technology/rss.xml",
+    # Reuters
     "http://feeds.reuters.com/reuters/businessNews",
-    "http://feeds.reuters.com/reuters/technologyNews",
-    # Finance
-    "https://feeds.bloomberg.com/markets/news.rss",
+    # Financial Times
     "https://www.ft.com/rss/home",
-    # Exec moves
-    "https://fortune.com/feed/",
-    "https://www.forbes.com/business/feed/",
-    # Extra
-    "https://feeds.marketwatch.com/marketwatch/topstories/",
-    "https://feeds.bbci.co.uk/news/business/rss.xml",
-    # CNN (high volume)
-    "http://rss.cnn.com/rss/edition_business.rss",
-    "http://rss.cnn.com/rss/cnn_tech.rss",
-    "http://rss.cnn.com/rss/cnn_topstories.rss",
-    # MSNBC / NBC
-    "http://feeds.nbcnews.com/feeds/topstories",
-    "http://feeds.nbcnews.com/feeds/business",
-    # General high-volume
-    "http://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+    # Economist
+    "https://www.economist.com/business/rss.xml",
+    # Bloomberg
+    "https://feeds.bloomberg.com/markets/news.rss",
 ]
 
 # Browser-like User-Agent: some feeds block generic Python clients.
@@ -1623,6 +1616,27 @@ _LOWERCASE_COMPANY_ALLOWLIST_LOWER = frozenset(
     }
 )
 
+# News publishers / outlets — not operating companies for ``company_name``.
+MEDIA_OUTLETS = frozenset(
+    {
+        "nytimes",
+        "new york times",
+        "forbes",
+        "bloomberg",
+        "reuters",
+        "cnn",
+        "bbc",
+        "msnbc",
+        "nbc",
+        "guardian",
+        "wsj",
+        "financial times",
+    }
+)
+
+# Article noise tokens sometimes mistaken for a company name.
+_COMPANY_GENERIC_WORD_REJECT = frozenset({"the", "a", "an", "this", "that"})
+
 
 def _normalize_company_place_key(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "").lower().strip())
@@ -1638,6 +1652,10 @@ def sanitize_company_name(name: str) -> str:
         return ""
     low = _normalize_company_place_key(raw)
     if raw.lower() == "unknown":
+        return ""
+    if low in MEDIA_OUTLETS:
+        return ""
+    if low in _COMPANY_GENERIC_WORD_REJECT:
         return ""
     if len(raw) < 3:
         return ""
@@ -2157,22 +2175,12 @@ def compute_wealth_score(
     return ws
 
 
-# --- Hard reject before extraction (RSS + finalize): spec list + legacy junk filters ---
-_INGEST_HARD_REJECT_SUBSTRINGS = (
-    # Required off-topic block (product spec)
+# --- Drop only clearly off-topic stories (ingest + finalize) ---
+_CLEARLY_IRRELEVANT_INGEST_SUBSTRINGS = (
     "weather",
-    "northern lights",
     "sports",
-    "pension",
-    "climate",
-    "war",
-    "crime",
-    "politics",
-    # Additional hard drops (retained)
-    "cyberattack",
-    "breach",
-    "lawsuit",
-    "trial",
+    "northern lights",
+    "celebrity gossip",
 )
 
 # Strict relevance: at least one of (A) financial (B) career (C) transaction — checked before extraction.
@@ -2193,10 +2201,10 @@ _STRICT_TRANSACTION_RE = re.compile(
 )
 
 
-def _contains_banned_topics(text: str) -> bool:
-    """True if text matches a hard-reject needle (drop before extraction)."""
+def _contains_clearly_irrelevant_topics(text: str) -> bool:
+    """True when the blob is clearly not business/finance (hard drop)."""
     t = (text or "").lower()
-    return any(s in t for s in _INGEST_HARD_REJECT_SUBSTRINGS)
+    return any(s in t for s in _CLEARLY_IRRELEVANT_INGEST_SUBSTRINGS)
 
 
 def _strict_relevance_patterns_match(text: str) -> bool:
@@ -2210,93 +2218,6 @@ def _strict_relevance_patterns_match(text: str) -> bool:
         or _STRICT_TRANSACTION_RE.search(t)
     )
 
-
-def source_quality_tier(url: str) -> int:
-    """
-    1 = high-trust business (looser signal bar), 2 = medium, 3 = general news (strictest), 0 = unknown.
-
-    Unknown hosts default to tier-2 behavior in ``_article_allowed_for_ingest``.
-    """
-    if not (url or "").strip():
-        return 0
-    try:
-        host = urlparse(str(url).strip()).netloc.lower()
-    except Exception:
-        host = ""
-    if not host:
-        host = str(url).lower().split("/")[0]
-    if host.startswith("www."):
-        host = host[4:]
-
-    def _ends(h: str, *suffixes: str) -> bool:
-        return any(h == s or h.endswith("." + s) for s in suffixes)
-
-    # Tier 1 — TechCrunch, Reuters, Bloomberg
-    if _ends(host, "techcrunch.com", "reuters.com", "bloomberg.com"):
-        return 1
-
-    # Tier 2 — CNBC, BBC Business, NYTimes Business (incl. ``feeds.bbci.co.uk``)
-    if _ends(host, "cnbc.com", "nytimes.com") or _ends(host, "bbc.com"):
-        return 2
-    if "bbc.co.uk" in host or "bbci.co.uk" in host:
-        return 2
-
-    # Tier 3 — CNN / NBC general
-    if _ends(host, "cnn.com", "nbcnews.com", "nbc.com", "msnbc.com"):
-        return 3
-
-    return 0
-
-
-def _signal_strong_money_or_deal(text: str) -> bool:
-    """Financial (money) or transaction (deal) pattern — required for tier-3 sources."""
-    t = text or ""
-    return bool(_STRICT_FINANCIAL_RE.search(t) or _STRICT_TRANSACTION_RE.search(t))
-
-
-_CAREER_MEDIUM_HEADLINE_RE = re.compile(
-    r"\b(?:CEO|CFO|CTO|appointed|appoints|named|names)\b",
-    re.I,
-)
-
-
-def _signal_medium_for_source_tier(text: str) -> bool:
-    """
-    Strong (money/deal) OR career with clear executive / appointment wording.
-    Stricter than bare ``joins``-only matches (tier-2 sources).
-    """
-    if _signal_strong_money_or_deal(text):
-        return True
-    t = text or ""
-    if not _STRICT_CAREER_RE.search(t):
-        return False
-    return bool(_CAREER_MEDIUM_HEADLINE_RE.search(t))
-
-
-def _article_allowed_for_ingest(text: str, source_url: str = "") -> bool:
-    """
-    Hard reject + baseline strict relevance, then source-tier bar:
-
-    - Tier 1: allow baseline (weaker career-only stories OK).
-    - Tier 2: require medium signal (money/deal OR executive appointment-class career).
-    - Tier 3: require strong money-or-deal signal only.
-    - Unknown host: tier-2 rule (medium).
-    """
-    if _contains_banned_topics(text):
-        return False
-    if not _strict_relevance_patterns_match(text):
-        return False
-
-    tier = source_quality_tier(source_url)
-    if tier == 0:
-        tier = 2
-    if tier == 1:
-        return True
-    if tier == 2:
-        return _signal_medium_for_source_tier(text)
-    if tier == 3:
-        return _signal_strong_money_or_deal(text)
-    return True
 
 _SOFT_ACTION_RE = re.compile(
     r"\b(?:"
@@ -2517,14 +2438,13 @@ def _is_relevant_signal(
     source_url: str = "",
 ) -> bool:
     """
-    Row is kept only if it passes the ingest gate: hard-reject topics, baseline relevance,
-    and ``source_url`` tier rules (see ``source_quality_tier`` / ``_article_allowed_for_ingest``).
+    Row is dropped only when clearly irrelevant (off-topic needles) or when the blob has
+    no financial keywords and no person and no company.
 
-    Thin metadata (missing person, Other, Unknown company) is handled via ``score`` penalties,
-    not row deletion — but rows with no relevance signals are dropped here.
+    ``source_url`` / ``legacy_event_type`` are ignored for gating (volume-friendly).
     """
-    del company_name, person_name, legacy_event_type
-    return _article_allowed_for_ingest(text_blob, source_url=source_url)
+    del legacy_event_type, source_url
+    return _article_row_should_keep(text_blob, person_name, company_name)
 
 
 def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -2558,9 +2478,10 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     - Dedupes across sources by person+company+event (or by raw_title when person is missing),
       keeping the highest score
     - Drops duplicate source_url rows, keeping the highest confidence / score first
-    - Drops rows that fail ingest hard-reject, strict relevance, or source-quality tier rules
-      (see ``source_quality_tier`` / ``_article_allowed_for_ingest``); thin metadata is scored for rows
-      that pass the gate
+    - Drops rows only when the story is clearly off-topic (small blocklist) or has no finance keywords
+      and no person and no company (see ``_article_row_should_keep``)
+    - Rows flagged ``weak_signal`` (no strict finance/career/transaction regex on the ingest blob) get
+      ``event_type`` = Other, ``why_it_matters`` for Other, and a final score in 30–50 (stable from URL)
     """
     if df is None or df.empty:
         out = pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -2698,6 +2619,15 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         apply_cross_company_enrichment(out)
 
         out["score"] = out["score"].map(clamp_score_0_100).astype(int)
+
+        weak = out["weak_signal"].fillna(False).astype(bool)
+        if weak.any():
+            out.loc[weak, "event_type"] = "Other"
+            _wm_other = why_it_matters_for_event_type("Other")
+            out.loc[weak, "why_it_matters"] = _wm_other
+            out.loc[weak, "score"] = out.loc[weak, "source_url"].map(
+                lambda u: _weak_signal_score_from_url(str(u or ""))
+            ).astype(int)
     else:
         out["wealth_score"] = 0
         out["estimated_wealth"] = 0.0
@@ -2716,8 +2646,17 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         out.loc[_hi, "priority_level"] = "High"
     out["suggested_next_step"] = out["priority_level"].apply(suggested_next_step_from_priority)
 
-    for col in ("outreach_angle", "priority_level", "suggested_next_step", "priority"):
-        out[col] = out[col].fillna("").astype(str).str.strip()
+    for col in (
+        "outreach_angle",
+        "priority_level",
+        "suggested_next_step",
+        "priority",
+        "ai_summary",
+        "ai_why_it_matters",
+        "ai_outreach",
+    ):
+        if col in out.columns:
+            out[col] = out[col].fillna("").astype(str).str.strip()
 
     # --- Extraction quality + confidence (single source of truth for hero sections) ---
     if not out.empty:
@@ -2748,6 +2687,9 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         out["additional_people"] = out["additional_people"].apply(
             lambda x: json.dumps(coerce_additional_people_list(x))
         )
+
+    if not out.empty and "weak_signal" in out.columns:
+        out["weak_signal"] = out["weak_signal"].fillna(False).astype(bool)
 
     return out[REQUIRED_COLUMNS].reset_index(drop=True)
 
@@ -2864,6 +2806,33 @@ def _finance_career_broad(title: str) -> bool:
         "job cut",
     )
     return any(n in t for n in needles)
+
+
+def _has_financial_keywords_for_ingest(blob: str) -> bool:
+    """Strict money/career/transaction match OR broad finance/business keywords (higher recall)."""
+    return _strict_relevance_patterns_match(blob) or _finance_career_broad(blob)
+
+
+def _article_row_should_keep(blob: str, person_name: str, company_name: str) -> bool:
+    """
+    Keep unless the story is clearly off-topic, or it has no finance keywords and no person and no company.
+
+    ``company_name`` should be the normalized/extracted value (``Unknown`` means no company).
+    """
+    if _contains_clearly_irrelevant_topics(blob):
+        return False
+    pn = str(person_name or "").strip()
+    cn = str(company_name or "").strip()
+    has_person = bool(pn)
+    has_company = bool(cn and cn.lower() != "unknown")
+    has_fin = _has_financial_keywords_for_ingest(blob)
+    return bool(has_fin or has_person or has_company)
+
+
+def _weak_signal_score_from_url(source_url: str) -> int:
+    """Stable score in [30, 50] from URL (weak-signal band)."""
+    h = hashlib.sha256(str(source_url or "").encode()).hexdigest()
+    return 30 + (int(h[:12], 16) % 21)
 
 
 def _classify_event_type(title: str) -> str | None:
@@ -3342,8 +3311,6 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         extraction_text = _extraction_text(article_paragraphs, title)
 
         blob_for_filter = f"{title} {summary} {article_paragraphs}".strip()
-        if not _article_allowed_for_ingest(blob_for_filter, source_url=link):
-            continue
 
         legacy_et = _classify_event_type(extraction_text) or "Other"
 
@@ -3356,6 +3323,11 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         person, extra_people, company, role, event_type_merged = _merge_ai_extraction_for_row(
             title, article_paragraphs, summary, person, extra_people, company, role, legacy_et
         )
+
+        if not _article_row_should_keep(blob_for_filter, person, company):
+            continue
+
+        weak_signal = not _strict_relevance_patterns_match(blob_for_filter)
 
         scan_text = f"{title} {summary} {extraction_text}".strip()
         structured_et, _ = structured_pattern_confidence_and_type(scan_text, legacy_event_type=legacy_et)
@@ -3379,6 +3351,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                 "quality_score": 0,
                 "confidence_score": 0,
                 "is_relevant": True,
+                "weak_signal": weak_signal,
             }
         )
 
@@ -3545,6 +3518,7 @@ def load_sample_signals() -> pd.DataFrame:
     rows = apply_scores(raw_list)
     df = pd.DataFrame(rows)
     out = finalize_dataframe(df)
+    out = enrich_dataframe_with_ai_interpretation(out)
     out.attrs["ingest_debug"] = {
         "raw_rss_entries": len(raw_list),
         "parsed_signal_rows": len(raw_list),
@@ -3587,6 +3561,7 @@ def fetch_signals() -> pd.DataFrame:
 
     if not raw_rows:
         out = finalize_dataframe(pd.DataFrame(columns=column_order))
+        out = enrich_dataframe_with_ai_interpretation(out)
         ingest_debug["rows_after_finalize"] = len(out)
         out.attrs["ingest_debug"] = ingest_debug
         return out
@@ -3594,6 +3569,7 @@ def fetch_signals() -> pd.DataFrame:
     scored = apply_scores(raw_rows)
     df = pd.DataFrame(scored)
     out = finalize_dataframe(df)
+    out = enrich_dataframe_with_ai_interpretation(out)
     ingest_debug["rows_after_finalize"] = len(out)
     out.attrs["ingest_debug"] = ingest_debug
     return out
