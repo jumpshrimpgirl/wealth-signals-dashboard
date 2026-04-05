@@ -1,13 +1,6 @@
 
 
-
-
-
-
-
-
-
-
+"""
 Wealth Signals Dashboard - Streamlit UI.
 
 Run: streamlit run app.py
@@ -21,7 +14,7 @@ import streamlit as st
 
 from data import fetch_signals
 
-# How long a signal counts as “NEW” in the feed (hours)
+# How long a signal counts as "NEW" in the feed (hours)
 NEW_WINDOW_HOURS = 48
 
 
@@ -382,20 +375,20 @@ if "signals_df" not in st.session_state:
 header_left, header_right = st.columns([4, 1])
 with header_left:
     st.markdown(
-        '<p class="ws-hero-title">Wealth Signals Dashboard</p>',
+        """<p class="ws-hero-title">Wealth Signals Dashboard</p>""",
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<p class="ws-hero-sub">Public career & finance signals from RSS (sample data if live fetch fails). '
-        "Demo only - not investment advice.</p>",
+        """<p class="ws-hero-sub">Public career & finance signals from RSS (sample data if live fetch fails). """
+        """Demo only - not investment advice.</p>""",
         unsafe_allow_html=True,
     )
     _df = st.session_state.signals_df
     if len(_df) > 0 and _df["detected_at"].notna().any():
         lu = _df["detected_at"].max()
         st.markdown(
-            f'<div class="ws-last-updated"><strong>{html.escape(format_detected_utc(lu))}</strong>'
-            f"<span>·</span><em>{html.escape(human_time_ago(lu))}</em></div>",
+            f"""<div class="ws-last-updated"><strong>{html.escape(format_detected_utc(lu))}</strong>"""
+            f"""<span>|</span><em>{html.escape(human_time_ago(lu))}</em></div>""",
             unsafe_allow_html=True,
         )
 with header_right:
@@ -407,7 +400,7 @@ with header_right:
 signals_df = st.session_state.signals_df
 
 # -----------------------------------------------------------------------------
-# Sidebar: filters first (so “Pipeline & debug” can use the filtered dataframe)
+# Sidebar: filters first (so "Pipeline & debug" can use the filtered dataframe)
 # -----------------------------------------------------------------------------
 st.sidebar.header("Filters")
 
@@ -425,7 +418,7 @@ selected_types = st.sidebar.multiselect(
 show_other = st.sidebar.checkbox(
     "Show low-confidence / Other signals",
     value=True,
-    help="When off, hides rows with event type “Other” (broad finance/career match).",
+    help='When off, hides rows with event type "Other" (broad finance/career match).',
 )
 
 min_score = st.sidebar.slider(
@@ -445,7 +438,7 @@ sort_by = st.sidebar.radio(
 
 search_q = st.sidebar.text_input(
     "Search",
-    placeholder="Person or company…",
+    placeholder="Person or company...",
     help="Matches person or company name (partial, case-insensitive).",
 ).strip()
 
@@ -470,7 +463,7 @@ if has_dates and use_date_filter:
         value=(dmin_d, dmax_d),
         min_value=dmin_d,
         max_value=dmax_d,
-        help="Only applied when “Filter by event date” is on. Rows with no date stay visible.",
+        help='Only applied when "Filter by event date" is on. Rows with no date stay visible.',
     )
     if isinstance(dr, tuple) and len(dr) == 2:
         date_start, date_end = dr[0], dr[1]
@@ -516,7 +509,7 @@ if len(filtered) > 0:
 _ingest = getattr(signals_df, "attrs", {}).get("ingest_debug", {})
 with st.sidebar.expander("Pipeline & debug", expanded=False):
     st.markdown("**Ingestion (last fetch)**")
-    st.caption("If raw ≫ parsed, classification is strict or headlines are off-topic.")
+    st.caption("If raw >> parsed, classification is strict or headlines are off-topic.")
     c1, c2 = st.columns(2)
     with c1:
         st.metric("Raw RSS items", _ingest.get("raw_rss_entries", "-"))
@@ -530,7 +523,7 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
     if len(filtered) > 0:
         miss_p = int((filtered["person_name"].fillna("") == "").sum())
         miss_r = int((filtered["role"].fillna("") == "").sum())
-        st.caption(f"Missing person_name: **{miss_p}** · Missing role: **{miss_r}**")
+        st.caption(f"Missing person_name: **{miss_p}** | Missing role: **{miss_r}**")
         st.markdown("**Counts by event_type**")
         _vc = filtered["event_type"].value_counts().rename_axis("event_type").reset_index(name="count")
         st.dataframe(_vc, hide_index=True, use_container_width=True)
@@ -564,7 +557,7 @@ else:
     top_high = high_only.sort_values(["event_type", "quality_score", "score"], ascending=[False, False, False]).head(5)
 
 if len(signals_df) > 0 and len(top_high) == 0:
-    st.info("No **High** priority signals right now (score ≥ 85). Lower the minimum score filter below or check back after refresh.")
+    st.info("No **High** priority signals right now (score >= 85). Lower the minimum score filter below or check back after refresh.")
 elif len(top_high) > 0:
     for i, (_, row) in enumerate(top_high.iterrows()):
         person = row["person_name"] or "-"
@@ -578,26 +571,29 @@ elif len(top_high) > 0:
             c1, c2 = st.columns([3, 1])
             with c1:
                 st.markdown(
-                    f'<p class="ws-card-line"><strong>{pe}</strong> · <em>{ce}</em>{new_html}</p>',
+                    f"""<p class="ws-card-line"><strong>{pe}</strong> | <em>{ce}</em>{new_html}</p>""",
                     unsafe_allow_html=True,
                 )
                 st.markdown(
-                    f'<p class="ws-card-line">{event_type_badge_html(row["event_type"])} {priority_badge_html("High")} · Score: {int(row["score"])} · {out_e}</p>',
+                    f"""<p class="ws-card-line">{event_type_badge_html(row["event_type"])} {priority_badge_html("High")} | Score: {int(row["score"])} | {out_e}</p>""",
                     unsafe_allow_html=True,
                 )
-                st.markdown(f'<p class="ws-card-meta">Detected {html.escape(ago)}</p>', unsafe_allow_html=True)
+                st.markdown(
+                    f"""<p class="ws-card-meta">Detected {html.escape(ago)}</p>""",
+                    unsafe_allow_html=True,
+                )
             with c2:
                 st.markdown(
-                    f'<p style="text-align:right;margin:0;font-size:1.2rem;font-weight:600;">{int(row["score"])}</p>',
+                    f"""<p style="text-align:right;margin:0;font-size:1.2rem;font-weight:600;">{int(row["score"])}</p>""",
                     unsafe_allow_html=True,
                 )
             st.caption(row["suggested_next_step"])
             st.markdown(
-                f'<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source →</a></p>',
+                f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
                 unsafe_allow_html=True,
             )
 
-st.markdown('<hr class="ws-rule"/>', unsafe_allow_html=True)
+st.markdown("""<hr class="ws-rule"/>""", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
 # Metrics (based on the full loaded dataset - before search / date slicing)
@@ -677,30 +673,33 @@ elif len(top_week) > 0:
             c1, c2 = st.columns([3, 1])
             with c1:
                 st.markdown(
-                    f'<p class="ws-card-line"><strong>{pe}</strong> · <em>{ce}</em>{new_html}</p>',
+                    f"""<p class="ws-card-line"><strong>{pe}</strong> | <em>{ce}</em>{new_html}</p>""",
                     unsafe_allow_html=True,
                 )
                 st.markdown(
-                    f'<p class="ws-card-line">{event_type_badge_html(row["event_type"])} {priority_badge_html(row["priority_level"])} · Score: {int(row["score"])}</p>',
+                    f"""<p class="ws-card-line">{event_type_badge_html(row["event_type"])} {priority_badge_html(row["priority_level"])} | Score: {int(row["score"])}</p>""",
                     unsafe_allow_html=True,
                 )
                 st.markdown(
-                    f'<p class="ws-card-line" style="font-size:0.85rem;">{out_e}</p>',
+                    f"""<p class="ws-card-line" style="font-size:0.85rem;">{out_e}</p>""",
                     unsafe_allow_html=True,
                 )
-                st.markdown(f'<p class="ws-card-meta">Detected {html.escape(ago)}</p>', unsafe_allow_html=True)
+                st.markdown(
+                    f"""<p class="ws-card-meta">Detected {html.escape(ago)}</p>""",
+                    unsafe_allow_html=True,
+                )
             with c2:
                 st.markdown(
-                    f'<p class="ws-score-pill" style="text-align:right;margin:0;">{int(row["score"])}</p>',
+                    f"""<p class="ws-score-pill" style="text-align:right;margin:0;">{int(row["score"])}</p>""",
                     unsafe_allow_html=True,
                 )
             st.write(row["why_it_matters"])
             st.markdown(
-                f'<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source →</a></p>',
+                f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
                 unsafe_allow_html=True,
             )
 
-st.markdown('<hr class="ws-rule"/>', unsafe_allow_html=True)
+st.markdown("""<hr class="ws-rule"/>""", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
 # Main table (formatted for readability)
@@ -782,7 +781,7 @@ col1, col2 = st.columns([2, 1])
 with col1:
     details_search = st.text_input(
         "Search details",
-        placeholder="Person, company, title, or role…",
+        placeholder="Person, company, title, or role...",
         key="details_search",
         label_visibility="collapsed"
     )
@@ -813,7 +812,7 @@ if details_search.strip():
 if priority_filter != "All":
     details_filtered = details_filtered[details_filtered["priority_level"] == priority_filter]
 
-st.markdown('<div class="ws-details-panel">', unsafe_allow_html=True)
+st.markdown("""<div class="ws-details-panel">""", unsafe_allow_html=True)
 
 for _, row in details_filtered.iterrows():
     person = row["person_name"] or "-"
@@ -830,7 +829,7 @@ for _, row in details_filtered.iterrows():
     det = human_time_ago(row.get("detected_at"))
     with st.expander(title_plain):
         st.markdown(
-            f'<p style="margin:0 0 0.75rem 0;">{new_html} {priority_badge_html(row["priority_level"])}</p>',
+            f"""<p style="margin:0 0 0.75rem 0;">{new_html} {priority_badge_html(row["priority_level"])}</p>""",
             unsafe_allow_html=True,
         )
         st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
@@ -849,4 +848,4 @@ for _, row in details_filtered.iterrows():
         st.markdown("**Source**")
         st.markdown(f"[Open public source]({row['source_url']})")
 
-st.markdown('</div>', unsafe_allow_html=True)
+st.markdown("""</div>""", unsafe_allow_html=True)
