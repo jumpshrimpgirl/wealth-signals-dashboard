@@ -27,6 +27,25 @@ EVENT_TYPE_RANK = {
 }
 
 
+def ensure_required_signal_columns(df: pd.DataFrame) -> None:
+    """Guarantee core columns exist so filters and hero sections never KeyError."""
+    for col in ["person_name", "company_name", "role", "event_type", "score"]:
+        if col not in df.columns:
+            df[col] = 0 if col == "score" else ""
+
+
+def ensure_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
+    """Add missing columns with safe defaults (strings empty, numeric scores 0, event_date NaT)."""
+    for col in columns:
+        if col not in df.columns:
+            if col in ("score", "quality_score", "confidence_score"):
+                df[col] = 0
+            elif col in ("event_date", "detected_at"):
+                df[col] = pd.NaT
+            else:
+                df[col] = ""
+
+
 def rank_for_hero_sections(df: pd.DataFrame) -> pd.DataFrame:
     """
     Curated ordering for top-of-page blocks: core types, strong extractions, then score.
@@ -36,6 +55,7 @@ def rank_for_hero_sections(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     d = df.copy()
+    ensure_required_signal_columns(d)
     if "confidence_score" not in d.columns:
         d["confidence_score"] = 0
     if "quality_score" not in d.columns:
@@ -512,6 +532,24 @@ inject_styles()
 if "signals_df" not in st.session_state:
     st.session_state.signals_df = fetch_signals()
 
+signals_df = st.session_state.signals_df
+ensure_required_signal_columns(signals_df)
+ensure_columns_present(
+    signals_df,
+    [
+        "raw_title",
+        "event_date",
+        "detected_at",
+        "priority_level",
+        "quality_score",
+        "confidence_score",
+        "outreach_angle",
+        "suggested_next_step",
+        "why_it_matters",
+        "full_explanation",
+    ],
+)
+
 # -----------------------------------------------------------------------------
 # Header row: title + refresh
 # -----------------------------------------------------------------------------
@@ -527,7 +565,7 @@ with st.container(border=True, key="ws_hero_bar"):
             """Demo only - not investment advice.</p>""",
             unsafe_allow_html=True,
         )
-        _df = st.session_state.signals_df
+        _df = signals_df
         if len(_df) > 0 and _df["detected_at"].notna().any():
             lu = _df["detected_at"].max()
             st.markdown(
@@ -541,8 +579,6 @@ with st.container(border=True, key="ws_hero_bar"):
             st.session_state.signals_df = fetch_signals()
             st.rerun()
 
-signals_df = st.session_state.signals_df
-
 # -----------------------------------------------------------------------------
 # Sidebar: filters first (so "Pipeline & debug" can use the filtered dataframe)
 # -----------------------------------------------------------------------------
@@ -551,7 +587,7 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-_event_opts = sorted(signals_df["event_type"].replace("", pd.NA).dropna().unique().tolist())
+_event_opts = sorted(signals_df.get("event_type", pd.Series(dtype=object)).replace("", pd.NA).dropna().unique().tolist())
 if not _event_opts:
     _event_opts = ["Founder Exit", "Funding", "Promotion", "Board Appointment", "Other"]
 
@@ -595,7 +631,10 @@ use_date_filter = st.sidebar.checkbox(
     help="Off by default so undated or wide date ranges do not hide the feed.",
 )
 
-has_dates = signals_df["event_date"].notna().any()
+has_dates = (
+    "event_date" in signals_df.columns
+    and signals_df["event_date"].notna().any()
+)
 date_start: date | None = None
 date_end: date | None = None
 
@@ -619,6 +658,22 @@ if has_dates and use_date_filter:
 
 # --- Apply filters ---
 filtered = signals_df.copy()
+ensure_required_signal_columns(filtered)
+ensure_columns_present(
+    filtered,
+    [
+        "raw_title",
+        "event_date",
+        "detected_at",
+        "priority_level",
+        "quality_score",
+        "confidence_score",
+        "outreach_angle",
+        "suggested_next_step",
+        "why_it_matters",
+        "full_explanation",
+    ],
+)
 
 if selected_types:
     filtered = filtered[filtered["event_type"].isin(selected_types)]
@@ -631,9 +686,11 @@ if not show_other:
 filtered = filtered[filtered["score"] >= min_score]
 
 if search_q:
-    pn = filtered["person_name"].fillna("").str.lower()
-    cn = filtered["company_name"].fillna("").str.lower()
-    rt = filtered["raw_title"].fillna("").str.lower() if "raw_title" in filtered.columns else pd.Series([""] * len(filtered))
+    pn = filtered.get("person_name", pd.Series([""] * len(filtered))).fillna("").str.lower()
+    cn = filtered.get("company_name", pd.Series([""] * len(filtered))).fillna("").str.lower()
+    rt = (
+        filtered.get("raw_title", pd.Series([""] * len(filtered))).fillna("").str.lower()
+    )
     mask = (
         pn.str.contains(search_q, regex=False, na=False)
         | cn.str.contains(search_q, regex=False, na=False)
@@ -668,11 +725,11 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
     st.markdown("**Current view (after filters)**")
     st.metric("Rows shown", len(filtered))
     if len(filtered) > 0:
-        miss_p = int((filtered["person_name"].fillna("") == "").sum())
-        miss_r = int((filtered["role"].fillna("") == "").sum())
+        miss_p = int((filtered.get("person_name", pd.Series([""] * len(filtered))).fillna("") == "").sum())
+        miss_r = int((filtered.get("role", pd.Series([""] * len(filtered))).fillna("") == "").sum())
         st.caption(f"Missing person_name: **{miss_p}** | Missing role: **{miss_r}**")
         st.markdown("**Counts by event_type**")
-        _vc = filtered["event_type"].value_counts().rename_axis("event_type").reset_index(name="count")
+        _vc = filtered.get("event_type", pd.Series(dtype=object)).value_counts().rename_axis("event_type").reset_index(name="count")
         st.dataframe(_vc, hide_index=True, use_container_width=True)
     else:
         st.caption("No rows match filters - widen event types, raise score ceiling, or enable Other.")
@@ -706,13 +763,13 @@ with st.container(border=True, key="ws_card_priority"):
         st.info("No **High** priority signals right now (score >= 85). Lower the minimum score filter below or check back after refresh.")
     elif len(top_high) > 0:
         for i, (_, row) in enumerate(top_high.iterrows()):
-            person = row["person_name"] or "-"
-            company = row["company_name"] or "Unknown"
+            person = row.get("person_name", "") or "-"
+            company = row.get("company_name", "") or "Unknown"
             pe, ce = html.escape(str(person)), html.escape(str(company))
-            out_e = html.escape(str(row["outreach_angle"]))
+            out_e = html.escape(str(row.get("outreach_angle", "")))
             new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
             ago = human_time_ago(row.get("detected_at"))
-            href = safe_href(row["source_url"])
+            href = safe_href(str(row.get("source_url", "")))
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 with c1:
@@ -721,7 +778,7 @@ with st.container(border=True, key="ws_card_priority"):
                         unsafe_allow_html=True,
                     )
                     st.markdown(
-                        f"""<p class="ws-card-line">{event_type_badge_html(row["event_type"])} {priority_badge_html("High")} | Score: {int(row["score"])} | {out_e}</p>""",
+                        f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html("High")} | Score: {int(row.get("score", 0) or 0)} | {out_e}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -730,10 +787,10 @@ with st.container(border=True, key="ws_card_priority"):
                     )
                 with c2:
                     st.markdown(
-                        f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{int(row["score"])}</p>""",
+                        f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{int(row.get("score", 0) or 0)}</p>""",
                         unsafe_allow_html=True,
                     )
-                st.caption(row["suggested_next_step"])
+                st.caption(row.get("suggested_next_step", ""))
                 st.markdown(
                     f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
                     unsafe_allow_html=True,
@@ -809,13 +866,13 @@ with st.container(border=True, key="ws_card_week"):
         st.info("No rows to highlight.")
     elif len(top_week) > 0:
         for i, (_, row) in enumerate(top_week.iterrows()):
-            person = row["person_name"] or "-"
-            company = row["company_name"] or "Unknown"
+            person = row.get("person_name", "") or "-"
+            company = row.get("company_name", "") or "Unknown"
             pe, ce = html.escape(str(person)), html.escape(str(company))
-            out_e = html.escape(str(row["outreach_angle"]))
+            out_e = html.escape(str(row.get("outreach_angle", "")))
             new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
             ago = human_time_ago(row.get("detected_at"))
-            href = safe_href(row["source_url"])
+            href = safe_href(str(row.get("source_url", "")))
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 with c1:
@@ -824,7 +881,7 @@ with st.container(border=True, key="ws_card_week"):
                         unsafe_allow_html=True,
                     )
                     st.markdown(
-                        f"""<p class="ws-card-line">{event_type_badge_html(row["event_type"])} {priority_badge_html(row["priority_level"])} | Score: {int(row["score"])}</p>""",
+                        f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(row.get("priority_level", ""))} | Score: {int(row.get("score", 0) or 0)}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -837,10 +894,10 @@ with st.container(border=True, key="ws_card_week"):
                     )
                 with c2:
                     st.markdown(
-                        f"""<p class="ws-score-pill" style="text-align:right;margin:0;">{int(row["score"])}</p>""",
+                        f"""<p class="ws-score-pill" style="text-align:right;margin:0;">{int(row.get("score", 0) or 0)}</p>""",
                         unsafe_allow_html=True,
                     )
-                st.write(row["why_it_matters"])
+                st.write(row.get("why_it_matters", ""))
                 st.markdown(
                     f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
                     unsafe_allow_html=True,
@@ -867,10 +924,12 @@ table_columns = [
     "confidence_score",
 ]
 
+ensure_columns_present(filtered, table_columns + ["detected_at"])
 display_df = filtered[table_columns].copy()
 if not display_df.empty:
-    display_df.insert(0, "Label", filtered["detected_at"].apply(lambda x: "NEW" if is_signal_new(x) else ""))
-    display_df["Detected"] = filtered["detected_at"].apply(human_time_ago)
+    _det = filtered.get("detected_at", pd.Series([pd.NaT] * len(filtered)))
+    display_df.insert(0, "Label", _det.apply(lambda x: "NEW" if is_signal_new(x) else ""))
+    display_df["Detected"] = _det.apply(human_time_ago)
 if not display_df.empty and "event_date" in display_df.columns:
     display_df["event_date"] = pd.to_datetime(display_df["event_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     display_df["event_date"] = display_df["event_date"].fillna("-")
@@ -959,10 +1018,10 @@ with st.container(border=True, key="ws_details_explorer"):
     details_filtered = filtered.copy()
     if details_search.strip():
         search_lower = details_search.strip().lower()
-        pn = details_filtered["person_name"].fillna("").str.lower()
-        cn = details_filtered["company_name"].fillna("").str.lower()
-        rt = details_filtered["raw_title"].fillna("").str.lower()
-        rl = details_filtered["role"].fillna("").str.lower()
+        pn = details_filtered.get("person_name", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
+        cn = details_filtered.get("company_name", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
+        rt = details_filtered.get("raw_title", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
+        rl = details_filtered.get("role", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
         mask = (
             pn.str.contains(search_lower, na=False, regex=False)
             | cn.str.contains(search_lower, na=False, regex=False)
@@ -980,11 +1039,11 @@ with st.container(border=True, key="ws_details_explorer"):
             st.caption("No rows match these filters. Clear the search or set Priority to All.")
         else:
             for _, row in details_filtered.iterrows():
-                person = row["person_name"] or "-"
-                company = row["company_name"] or "Unknown"
+                person = row.get("person_name", "") or "-"
+                company = row.get("company_name", "") or "Unknown"
                 new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
-                title_plain = f"{person} - {row['event_type']} @ {company}"
-                ed = row["event_date"]
+                title_plain = f"{person} - {row.get('event_type', '')} @ {company}"
+                ed = row.get("event_date")
                 if pd.isna(ed):
                     date_str = "-"
                 else:
@@ -993,21 +1052,21 @@ with st.container(border=True, key="ws_details_explorer"):
                 det = human_time_ago(row.get("detected_at"))
                 with st.expander(title_plain):
                     st.markdown(
-                        f"""<p style="margin:0 0 0.75rem 0;">{new_html} {priority_badge_html(row["priority_level"])}</p>""",
+                        f"""<p style="margin:0 0 0.75rem 0;">{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
-                    st.markdown(f"**Priority:** {row['priority_level']}")
+                    st.markdown(f"**Priority:** {row.get('priority_level', '')}")
                     st.markdown(f"**Detected:** {det}")
-                    st.markdown(f"**Outreach suggestion:** {row['outreach_angle']}")
-                    st.markdown(f"**Suggested next step:** {row['suggested_next_step']}")
+                    st.markdown(f"**Outreach suggestion:** {row.get('outreach_angle', '')}")
+                    st.markdown(f"**Suggested next step:** {row.get('suggested_next_step', '')}")
                     st.markdown("---")
-                    st.markdown(f"**Role:** {row['role'] or '-'}")
+                    st.markdown(f"**Role:** {row.get('role') or '-'}")
                     st.markdown(f"**Date:** {date_str}")
-                    st.markdown(f"**Score:** {int(row['score'])}")
+                    st.markdown(f"**Score:** {int(row.get('score', 0) or 0)}")
                     st.markdown("**Why it matters**")
-                    st.write(row["why_it_matters"])
+                    st.write(row.get("why_it_matters", ""))
                     st.markdown("**Full explanation**")
-                    st.write(row["full_explanation"] or "-")
+                    st.write(row.get("full_explanation") or "-")
                     st.markdown("**Source**")
-                    st.markdown(f"[Open public source]({row['source_url']})")
+                    st.markdown(f"[Open public source]({row.get('source_url', '')})")

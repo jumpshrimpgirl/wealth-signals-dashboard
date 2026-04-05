@@ -16,7 +16,7 @@ import feedparser
 import pandas as pd
 import requests
 
-from score import apply_scores, score_for_event_type
+from score import apply_scores, compute_signal_score
 
 # -----------------------------------------------------------------------------
 # Column contract: every row returned to the app must have these keys.
@@ -622,7 +622,15 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[missing_detected, "detected_at"] = pd.Timestamp.now(tz=timezone.utc)
 
     # --- Scores always follow score.py rules for the current event_type ---
-    out["score"] = out["event_type"].apply(lambda et: score_for_event_type(str(et)))
+    out["score"] = out.apply(
+        lambda row: compute_signal_score(
+            str(row.get("event_type", "")),
+            str(row.get("person_name", "")),
+            str(row.get("company_name", "")),
+            str(row.get("role", "")),
+        ),
+        axis=1,
+    )
 
     # --- Action layer: who to prioritize and what to say (derived from score + event_type) ---
     out["outreach_angle"] = out.apply(generate_outreach_angle, axis=1)
