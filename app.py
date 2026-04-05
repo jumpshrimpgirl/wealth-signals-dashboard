@@ -1444,6 +1444,11 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
         st.metric("Parsed signals", _ingest.get("parsed_signal_rows", "-"))
     st.metric("Rows after dedupe", _ingest.get("rows_after_finalize", len(signals_df)))
     st.caption(f"Source: `{_ingest.get('data_source', 'unknown')}`")
+    if "social_rss_feeds_configured" in _ingest:
+        st.caption(
+            f"Social RSS feeds in config: **{_ingest['social_rss_feeds_configured']}** "
+            "(Mastodon tags + optional `WEALTH_SOCIAL_RSS_URLS`)."
+        )
     st.divider()
     st.markdown("**Current view (after filters + explore rules)**")
     st.metric("Rows shown", len(explore_view))

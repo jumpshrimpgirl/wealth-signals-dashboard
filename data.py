@@ -1,7 +1,10 @@
 """
 Data layer: sample signals (fallback) and live RSS-based signals.
 
-Uses public RSS feeds only - no LinkedIn or private sources.
+Primary sources: news wires, Google News search queries, and optional **social** via public RSS
+(Mastodon hashtag timelines). X (Twitter) and LinkedIn do not offer stable unauthenticated RSS; add
+feed URLs yourself with the ``WEALTH_SOCIAL_RSS_URLS`` environment variable (e.g. self-hosted
+RSSHub or similar bridges).
 """
 
 from __future__ import annotations
@@ -13,7 +16,8 @@ import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
+from difflib import SequenceMatcher
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import feedparser
 import pandas as pd
@@ -354,38 +358,122 @@ def _apply_value_priority_tags(out: pd.DataFrame) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Public RSS feeds (business / tech news). Swap or extend as needed.
+# Targeted Google News search RSS (wealth / deal language). Fetched with static feeds.
+# Each query is a separate feed; overlap is removed by ``deduplicate_articles``.
 # -----------------------------------------------------------------------------
-RSS_FEEDS = [
-    # BBC
-    "http://feeds.bbci.co.uk/news/business/rss.xml",
-    "http://feeds.bbci.co.uk/news/technology/rss.xml",
+SEARCH_QUERIES = [
+    "startup raised million",
+    "raised funding series",
+    "company valuation billion",
+    "founder said revenue",
+    "startup revenue growth",
+    "company acquired for",
+    "sold company for",
+    "IPO filing",
+    "net worth founder",
+    "stake worth",
+    "private company growth",
+    "billion revenue startup",
+    "AI startup revenue",
+    "health startup growth",
+]
+
+
+def google_news_search_feed_urls() -> list[str]:
+    """Dynamic Google News RSS URLs (US English)."""
+    base = "https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+    return [base.format(q=quote(query, safe="")) for query in SEARCH_QUERIES]
+
+
+# Curated static feeds: high signal density first; generic macro/news reduced vs BBC-heavy lists.
+RSS_FEEDS_HIGH_SIGNAL = [
+    # Press / corporate (PR Newswire hub; Business Wire often 403 from bots — optional)
+    "https://rss.prnewswire.com/rss/",
+    "https://www.globenewswire.com/RssFeed",
+    # Vertical / deals (Bloomberg industries + existing markets/wealth below)
+    "https://feeds.bloomberg.com/industries/news.rss",
+    "https://news.crunchbase.com/feed/",
+    "https://techcrunch.com/feed/",
+    "https://venturebeat.com/feed/",
+    "https://www.forbes.com/innovation/feed/",
+    # Optional: may return 403 in some environments — skipped without failing the whole ingest
+    "https://www.businesswire.com/news/rss/",
+]
+
+RSS_FEEDS_CORE = [
     # Reuters
     "http://feeds.reuters.com/reuters/businessNews",
     "http://feeds.reuters.com/reuters/technologyNews",
     # Financial Times
     "https://www.ft.com/rss/home",
-    # Economist
+    # Economist (business — not generic home macro)
     "https://www.economist.com/business/rss.xml",
     # Bloomberg
     "https://feeds.bloomberg.com/markets/news.rss",
     "https://feeds.bloomberg.com/wealth/news.rss",
-    # Additional global business / markets (same pipeline + FA hard gates apply)
+    # US business / markets (no BBC / Guardian: low FA signal density per product spec)
     "https://www.cnbc.com/id/100003114/device/rss/rss.html",
     "https://www.marketwatch.com/rss/topstories",
-    "https://www.theguardian.com/uk/business/rss",
     "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
-    # Tech / venture (more lead volume; downstream filters apply)
-    "https://techcrunch.com/feed/",
-    "https://venturebeat.com/feed/",
     "https://www.businessinsider.com/rss",
     "https://fortune.com/feed/",
 ]
 
-# Browser-like User-Agent: some feeds block generic Python clients.
+
+# -----------------------------------------------------------------------------
+# Social media (public RSS only — same ingest path as news; deduped with everything else).
+# Mastodon exposes standard RSS for hashtag timelines (good recall for funding / startup chatter).
+# For X/LinkedIn/Bluesky, paste bridge RSS URLs into WEALTH_SOCIAL_RSS_URLS (comma-separated).
+# -----------------------------------------------------------------------------
+SOCIAL_MEDIA_RSS_FEEDS = [
+    "https://mastodon.social/tags/funding.rss",
+    "https://mastodon.social/tags/startups.rss",
+    "https://mastodon.social/tags/venturecapital.rss",
+    "https://mastodon.social/tags/acquisition.rss",
+    "https://mastodon.social/tags/ipo.rss",
+]
+
+
+def social_media_rss_urls() -> list[str]:
+    """Default Mastodon tag feeds plus optional ``WEALTH_SOCIAL_RSS_URLS`` (comma-separated)."""
+    urls = list(SOCIAL_MEDIA_RSS_FEEDS)
+    extra = (os.environ.get("WEALTH_SOCIAL_RSS_URLS") or "").strip()
+    if extra:
+        for part in extra.split(","):
+            u = part.strip()
+            if u and u not in urls:
+                urls.append(u)
+    return urls
+
+
+def all_rss_feed_urls() -> list[str]:
+    """All RSS URLs: Google News + static feeds + social (deduped by URL string)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in (
+        google_news_search_feed_urls()
+        + RSS_FEEDS_HIGH_SIGNAL
+        + RSS_FEEDS_CORE
+        + social_media_rss_urls()
+    ):
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+# Back-compat: single name used by ``fetch_signals``.
+RSS_FEEDS = all_rss_feed_urls()
+
+
+# Browser-like User-Agent: Google News and several publishers block non-browser clients.
 REQUEST_HEADERS = {
-    "User-Agent": "WealthSignalsDashboard/1.0 (+https://example.local; educational project)",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 # Article pages (HTML) — many sites require browser-like Accept.
@@ -3206,18 +3294,11 @@ def _has_financial_keywords_for_ingest(blob: str) -> bool:
 
 def _article_row_should_keep(blob: str, person_name: str, company_name: str) -> bool:
     """
-    Keep unless the story is clearly off-topic, or it has no finance keywords and no person and no company.
-
-    ``company_name`` should be the normalized/extracted value (``Unknown`` means no company).
+    Drop only clearly off-topic blobs. Do not require finance keywords here — search feeds and
+    wires are pre-targeted; AI + downstream validation filter quality.
     """
-    if _contains_clearly_irrelevant_topics(blob):
-        return False
-    pn = str(person_name or "").strip()
-    cn = str(company_name or "").strip()
-    has_person = bool(pn)
-    has_company = bool(cn and cn.lower() != "unknown")
-    has_fin = _has_financial_keywords_for_ingest(blob)
-    return bool(has_fin or has_person or has_company)
+    del person_name, company_name
+    return not _contains_clearly_irrelevant_topics(blob)
 
 
 def _weak_signal_score_from_url(source_url: str) -> int:
@@ -3308,6 +3389,143 @@ def _parse_entry_date(entry: Any) -> str:
     except (TypeError, ValueError):
         pass
     return datetime.now(timezone.utc).date().isoformat()
+
+
+_TRACKING_QUERY_KEYS = frozenset(
+    {
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_content",
+        "utm_term",
+        "mc_cid",
+        "mc_eid",
+        "ref",
+        "ref_src",
+        "fbclid",
+        "gclid",
+    }
+)
+
+
+def _canonical_url_for_dedup(url: str) -> str:
+    """Normalize URL for duplicate detection (strip tracking params, stable path)."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        p = urlparse(raw)
+        if not p.netloc:
+            return raw.lower()
+        netloc = (p.netloc or "").lower()
+        path = (p.path or "").rstrip("/") or "/"
+        pairs = [
+            (k, v)
+            for k, v in parse_qsl(p.query, keep_blank_values=True)
+            if k.lower() not in _TRACKING_QUERY_KEYS and not k.lower().startswith("utm_")
+        ]
+        pairs.sort()
+        q = urlencode(pairs)
+        return urlunparse((p.scheme.lower() or "https", netloc, path, "", q, ""))
+    except (TypeError, ValueError):
+        return raw.lower()
+
+
+def _strip_trailing_outlet_for_dedup(title: str) -> str:
+    """Remove trailing `` - TechCrunch``-style suffix when it looks like an outlet, not part of the headline."""
+    t = (title or "").strip()
+    m = re.match(r"^(.{15,})\s+[-–—]\s+([A-Za-z0-9][A-Za-z0-9 &.'’-]{1,50})$", t)
+    if not m:
+        return t
+    head, tail = m.group(1).strip(), m.group(2).strip()
+    tl = tail.lower()
+    if any(x in tl for x in ("$", "€", "£", "%", "million", "billion", "series ", "round", "ipo")):
+        return t
+    if len(tail.split()) > 6:
+        return t
+    return head
+
+
+def _headline_for_dedup(title: str) -> str:
+    """Normalize headline for fuzzy duplicate detection."""
+    t = _strip_trailing_outlet_for_dedup(title)
+    t = re.sub(r"[^\w\s]", " ", t.lower())
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _feed_entry_quality_key(entry: Any) -> tuple[str, int]:
+    """Higher is better when sorted with ``reverse=True``: newer ISO date, then longer text."""
+    d = _parse_entry_date(entry)
+    summ = _strip_html(getattr(entry, "summary", None) or getattr(entry, "description", None) or "")
+    title = (getattr(entry, "title", None) or "").strip()
+    return (d, len(summ) + len(title))
+
+
+def deduplicate_articles(entries: list[Any]) -> list[Any]:
+    """
+    Deduplicate RSS feedparser entries before signal extraction.
+
+    - Same canonical URL → keep the higher-quality entry.
+    - Different URLs but same headline (sequence + token overlap) → keep one.
+    """
+    if not entries:
+        return []
+
+    # Pass 1: by canonical URL
+    by_url: dict[str, Any] = {}
+    for e in entries:
+        link = (getattr(e, "link", None) or "").strip()
+        c = _canonical_url_for_dedup(link)
+        if not c:
+            continue
+        if c not in by_url:
+            by_url[c] = e
+        elif _feed_entry_quality_key(e) > _feed_entry_quality_key(by_url[c]):
+            by_url[c] = e
+
+    first_pass = list(by_url.values())
+
+    # Pass 2: title similarity (cross-outlet duplicates)
+    first_pass.sort(key=_feed_entry_quality_key, reverse=True)
+    kept: list[Any] = []
+
+    def _similar(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        ra = _headline_for_dedup(a)
+        rb = _headline_for_dedup(b)
+        if not ra or not rb:
+            return False
+        if ra == rb:
+            return True
+        if SequenceMatcher(None, ra, rb).ratio() >= 0.88:
+            return True
+        sa, sb = set(ra.split()), set(rb.split())
+        if len(sa) < 4 or len(sb) < 4:
+            return False
+        inter = len(sa & sb)
+        union = len(sa | sb)
+        return union > 0 and (inter / union) >= 0.55
+
+    for e in first_pass:
+        t = (getattr(e, "title", None) or "").strip()
+        if not t:
+            continue
+        replaced = False
+        for i, k in enumerate(kept):
+            kt = (getattr(k, "title", None) or "").strip()
+            if _similar(t, kt):
+                if _feed_entry_quality_key(e) > _feed_entry_quality_key(k):
+                    kept[i] = e
+                replaced = True
+                break
+        if not replaced:
+            kept.append(e)
+
+    return kept
 
 
 # --- Person name extraction (conservative; empty string unless confident) ---
@@ -4014,13 +4232,18 @@ def fetch_signals() -> pd.DataFrame:
     column_order = REQUIRED_COLUMNS
 
     all_entries: list[Any] = []
+    failed_feeds = 0
 
-    for url in RSS_FEEDS:
+    for url in all_rss_feed_urls():
         try:
             all_entries.extend(_fetch_one_feed(url))
         except RuntimeError:
             # One feed can fail; others may still work. If all fail, we fall back below.
+            failed_feeds += 1
             continue
+
+    raw_before_dedup = len(all_entries)
+    all_entries = deduplicate_articles(all_entries)
 
     if not all_entries:
         # Every feed failed or returned no entries - use sample data
@@ -4029,6 +4252,10 @@ def fetch_signals() -> pd.DataFrame:
     raw_rows = _rss_items_to_signals(all_entries)
     ingest_debug: dict[str, Any] = {
         "raw_rss_entries": len(all_entries),
+        "raw_rss_entries_before_dedup": raw_before_dedup,
+        "rss_feeds_failed": failed_feeds,
+        "rss_feed_urls_tried": len(all_rss_feed_urls()),
+        "social_rss_feeds_configured": len(social_media_rss_urls()),
         "parsed_signal_rows": len(raw_rows),
         "data_source": "rss",
     }
