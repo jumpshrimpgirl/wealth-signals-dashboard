@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 
-from data import fetch_signals
+from data import fetch_signals, format_wealth
 from person_validation import is_valid_person
 
 # How long a signal counts as "NEW" in the feed (hours)
@@ -29,6 +29,31 @@ HOME_TOP_SIGNALS = 5
 # Explore view: drop weak / noisy rows (after sidebar filters)
 EXPLORE_MIN_SCORE = 30
 
+# Columns searched by the sidebar text box (must stay aligned with Details / table labels).
+SEARCHABLE_COLUMNS = (
+    "person_name",
+    "company_name",
+    "raw_title",
+    "role",
+    "wealth_signal_label",
+    "liquidity_event",
+    "client_type",
+    "source_of_wealth",
+    "why_it_matters",
+    "ai_summary",
+    "ai_wealth_signal",
+    "ai_liquidity_label",
+    "ai_client_who",
+    "ai_why_money",
+    "ai_why_it_matters",
+    "ai_outreach",
+    "est_wealth_display",
+    "net_worth",
+    "billionaire_company",
+    "priority_level",
+    "full_explanation",
+)
+
 # Company field: clear when it looks like a news outlet (substring match on normalized name)
 KNOWN_OUTLETS_TOKENS = frozenset(
     {"bbc", "cnn", "nyt", "economist", "forbes", "reuters", "techcrunch", "bloomberg", "msnbc", "nbc"}
@@ -36,6 +61,67 @@ KNOWN_OUTLETS_TOKENS = frozenset(
 
 # Person field: drop obvious non-name tokens
 BAD_PERSON_TOKENS = frozenset({"the", "a", "in", "on", "air force", "central alabama"})
+
+
+def _fa_nonempty(val, *, fallback: str) -> str:
+    t = str(val or "").strip()
+    return t if t else fallback
+
+
+def wealth_signal_for_display(r: pd.Series) -> str:
+    """AI refines rules-based label when present; same concept as sidebar / table."""
+    a = str(r.get("ai_wealth_signal") or "").strip()
+    if a:
+        return a
+    return _fa_nonempty(r.get("wealth_signal_label"), fallback="Data pending")
+
+
+def liquidity_for_display(r: pd.Series) -> str:
+    a = str(r.get("ai_liquidity_label") or "").strip()
+    if a:
+        return a
+    w = str(r.get("liquidity_event") or "").strip()
+    return w if w else "No clear liquidity event"
+
+
+def client_type_for_display(r: pd.Series) -> str:
+    return _fa_nonempty(r.get("client_type"), fallback="Unknown")
+
+
+def source_of_wealth_for_display(r: pd.Series) -> str:
+    return _fa_nonempty(r.get("source_of_wealth"), fallback="Data pending")
+
+
+def prospect_who_for_display(r: pd.Series) -> str:
+    a = str(r.get("ai_client_who") or "").strip()
+    if a:
+        return a
+    pn = str(r.get("person_name") or "").strip()
+    rl = str(r.get("role") or "").strip()
+    if pn and rl:
+        return f"{pn} — {rl}"
+    if pn:
+        return pn
+    return "Not identified"
+
+
+def why_money_one_liner(r: pd.Series) -> str:
+    w = str(r.get("ai_why_money") or "").strip()
+    if w:
+        return w
+    return _fa_nonempty(r.get("why_it_matters"), fallback="Data pending")
+
+
+def apply_prospect_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    """Subset rows where ``query`` appears in any searchable prospect field (same scope as Details)."""
+    q = (query or "").strip()
+    if not q or df is None or df.empty:
+        return df
+    mask = pd.Series(False, index=df.index)
+    for c in SEARCHABLE_COLUMNS:
+        if c in df.columns:
+            mask = mask | df[c].fillna("").astype(str).str.contains(q, case=False, na=False, regex=False)
+    return df[mask]
 
 
 def _source_outlet_from_url(url: str) -> str:
@@ -106,12 +192,20 @@ def prepare_explore_view(df: pd.DataFrame) -> pd.DataFrame:
         else:
             out[q] = pd.to_numeric(out[q], errors="coerce").fillna(0)
     out["score"] = pd.to_numeric(out["score"], errors="coerce").fillna(0)
+    if "wealth_rank" not in out.columns:
+        out["wealth_rank"] = 3
+    out["wealth_rank"] = pd.to_numeric(out["wealth_rank"], errors="coerce").fillna(3).astype(int)
+    if "event_date" not in out.columns:
+        out["event_date"] = pd.NaT
+    out["wealth_signal_display"] = out.apply(wealth_signal_for_display, axis=1)
+    out["liquidity_display"] = out.apply(liquidity_for_display, axis=1)
+    out["_person_clear"] = (out["person_name"].fillna("").astype(str).str.strip() != "").astype(int)
     out = out.sort_values(
-        by=["score", "quality_score", "confidence_score"],
-        ascending=[False, False, False],
+        by=["wealth_rank", "_person_clear", "event_date", "quality_score", "score"],
+        ascending=[True, False, False, False, False],
         na_position="last",
     )
-    return out
+    return out.drop(columns=["_person_clear"], errors="ignore")
 
 
 # Hero sections: core event types rank above "Other" (do not use categorical sort — it reversed order).
@@ -232,8 +326,8 @@ def ensure_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
     """Add missing columns with safe defaults (strings empty, numeric scores 0, event_date NaT)."""
     for col in columns:
         if col not in df.columns:
-            if col in ("score", "quality_score", "confidence_score"):
-                df[col] = 0
+            if col in ("score", "quality_score", "confidence_score", "wealth_rank"):
+                df[col] = 0 if col != "wealth_rank" else 3
             elif col in ("event_date", "detected_at"):
                 df[col] = pd.NaT
             else:
@@ -242,9 +336,9 @@ def ensure_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
 
 def rank_for_hero_sections(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Curated ordering for hero blocks: core types, strong extractions, then score.
+    Fallback ordering for Home: wealth-signal strength first, then event-type tier, then clarity.
 
-    Used only as a fallback when AI ranking is unavailable (Home tab).
+    Not used when AI re-ranking returns results. Outlet / source is not a ranking factor.
     """
     if df is None or df.empty:
         return df
@@ -254,12 +348,18 @@ def rank_for_hero_sections(df: pd.DataFrame) -> pd.DataFrame:
         d["confidence_score"] = 0
     if "quality_score" not in d.columns:
         d["quality_score"] = 0
+    if "wealth_rank" not in d.columns:
+        d["wealth_rank"] = 3
+    d["wealth_rank"] = pd.to_numeric(d["wealth_rank"], errors="coerce").fillna(3).astype(int)
+    if "event_date" not in d.columns:
+        d["event_date"] = pd.NaT
     d["_ev"] = d["event_type"].map(EVENT_TYPE_RANK).fillna(0).astype(int)
     d["_pn"] = (d["person_name"].fillna("").str.strip() != "").astype(int)
     d["_cn"] = ((d["company_name"].fillna("").str.strip() != "") & (d["company_name"] != "Unknown")).astype(int)
     d = d.sort_values(
-        by=["_ev", "confidence_score", "quality_score", "score", "_pn", "_cn"],
-        ascending=[False, False, False, False, False, False],
+        by=["wealth_rank", "_pn", "event_date", "_ev", "quality_score", "score", "_cn"],
+        ascending=[True, False, False, False, False, False, False],
+        na_position="last",
     )
     return d.drop(columns=["_ev", "_pn", "_cn"], errors="ignore")
 
@@ -415,6 +515,36 @@ def inject_styles() -> None:
     height: 1px;
     background: linear-gradient(90deg, transparent, #94a3b8 12%, #94a3b8 88%, transparent);
     margin: 0.45rem 0;
+  }
+
+  /* ----- Main tabs: Home / Explore & data — black (tablist only; not panel buttons) ----- */
+  [data-testid="stTabs"] [role="tablist"] {
+    gap: 0.25rem !important;
+    border-bottom-color: #000000 !important;
+  }
+  [data-testid="stTabs"] [role="tablist"] [role="tab"],
+  [data-testid="stTabs"] [role="tablist"] button[data-baseweb="tab"] {
+    background-color: #000000 !important;
+    color: #ffffff !important;
+    border-color: #262626 !important;
+    border-radius: 8px 8px 0 0 !important;
+    font-weight: 600 !important;
+  }
+  [data-testid="stTabs"] [role="tablist"] [role="tab"][aria-selected="false"],
+  [data-testid="stTabs"] [role="tablist"] button[aria-selected="false"] {
+    background-color: #171717 !important;
+    color: #e5e5e5 !important;
+  }
+  [data-testid="stTabs"] [role="tablist"] [role="tab"][aria-selected="true"],
+  [data-testid="stTabs"] [role="tablist"] button[aria-selected="true"] {
+    background-color: #000000 !important;
+    color: #ffffff !important;
+    border-bottom: 2px solid #ffffff !important;
+  }
+  [data-testid="stTabs"] [role="tablist"] [role="tab"]:hover,
+  [data-testid="stTabs"] [role="tablist"] button:hover {
+    background-color: #262626 !important;
+    color: #ffffff !important;
   }
 
   /* ----- Section shell cards (priority / week / metrics) ----- */
@@ -787,16 +917,16 @@ def rank_signals_with_ai(df: pd.DataFrame) -> list[dict]:
         return [signals[0]]
 
     payload = json.dumps(signals, indent=2)
-    prompt = f"""You are a top financial advisor targeting $5M+ clients.
+    prompt = f"""You are a private banker scanning for high-net-worth client leads (not a news editor).
 
 From this list of signals, select the BEST {k} outreach opportunities.
 
 Rules:
-- Prioritize liquidity events (exits, funding, promotions)
-- Prioritize wealthy individuals (use net_worth as a hint)
-- Ignore irrelevant or macro-only news
+- Prioritize clear wealth signals: liquidity (exits, IPOs, large funding), identifiable individuals with money movement
+- Use net_worth only as a hint for scale — do NOT prefer a story because the outlet is famous (BBC, Reuters, etc.)
+- Ignore macro-only or political stories with no personal wealth angle
 - Ignore journalists, locations, governments as the primary "person"
-- Prefer real individuals with plausible money movement
+- Prefer real individuals with plausible monetization or existing wealth
 
 Return a JSON object with a single key "ranked" whose value is an array of exactly {k} objects.
 Each object must include these keys copied exactly from the chosen rows in the list below:
@@ -968,6 +1098,16 @@ ensure_columns_present(
         "ai_summary",
         "ai_why_it_matters",
         "ai_outreach",
+        "est_wealth_display",
+        "wealth_rank",
+        "wealth_signal_label",
+        "liquidity_event",
+        "client_type",
+        "source_of_wealth",
+        "ai_wealth_signal",
+        "ai_liquidity_label",
+        "ai_client_who",
+        "ai_why_money",
     ],
 )
 
@@ -978,11 +1118,14 @@ with st.container(border=True, key="ws_hero_bar"):
     st.markdown(
         """
 <h2 style='margin-bottom:0;'>Wealth Signals</h2>
-<p style='color:#9CA3AF; margin-top:0;'>High-probability client opportunities</p>
+<p style='color:#9CA3AF; margin-top:0;'>Wealth prospecting for financial advisors</p>
 """,
         unsafe_allow_html=True,
     )
-    st.caption("Public career & finance signals from RSS (sample if live fetch fails). Demo only — not investment advice.")
+    st.caption(
+        "Prospect feed from public RSS (sample if live fetch fails). Built for financial advisors scanning for "
+        "wealth signals—not a general news dashboard. Demo only — not investment advice."
+    )
     _df = signals_df
     if len(_df) > 0 and _df["detected_at"].notna().any():
         lu = _df["detected_at"].max()
@@ -993,37 +1136,83 @@ with st.container(border=True, key="ws_hero_bar"):
         )
 
 # -----------------------------------------------------------------------------
-# Sidebar: filters first (so "Pipeline & debug" can use the filtered dataframe)
+# Sidebar: same prospect schema as the table & Details (wealth-focused, not generic news)
 # -----------------------------------------------------------------------------
 st.sidebar.markdown(
-    """<p class="ws-sidebar-filters-title">Filters</p>""",
+    """<p class="ws-sidebar-filters-title">Find prospects</p>""",
     unsafe_allow_html=True,
 )
+st.sidebar.caption(
+    "Filter by the **same fields** shown in Details: names, roles, companies, wealth signal, "
+    "liquidity, client type, source-of-wealth hints, story text, and AI notes. "
+    "Use this to find founders, executives, investors, athletes, heirs, liquidity events, and estimated-wealth cues."
+)
+
+search_query = st.sidebar.text_input(
+    "Search prospects",
+    placeholder="Name, company, role, wealth signal, liquidity, client type, source of wealth…",
+    help=(
+        "Case-insensitive partial match across prospect fields: Name, Role / title, Company, Wealth signal, "
+        "Liquidity event, Client type, Source of wealth, Why it matters, AI summary, estimated wealth display, "
+        "article text, and priority. Same scope as the Details panel."
+    ),
+).strip()
 
 _event_opts = sorted(signals_df.get("event_type", pd.Series(dtype=object)).replace("", pd.NA).dropna().unique().tolist())
 if not _event_opts:
     _event_opts = ["Founder Exit", "Funding", "Promotion", "Board Appointment", "Other"]
 
 selected_types = st.sidebar.multiselect(
-    "Event type",
+    "Story category",
     options=_event_opts,
     default=_event_opts,
-    help="Include every type by default. Narrow to debug specific buckets.",
+    help="Pipeline event bucket (same as in row details). Leave all selected to include every category.",
+)
+
+_ws_present = set(signals_df.get("wealth_signal_label", pd.Series(dtype=object)).replace("", pd.NA).dropna().unique().tolist())
+_ws_order = ("Strong", "Moderate", "Weak", "None")
+_wealth_sig_options = [x for x in _ws_order if x in _ws_present] or list(_ws_order)
+selected_wealth_signals = st.sidebar.multiselect(
+    "Wealth signal",
+    options=_wealth_sig_options,
+    default=_wealth_sig_options,
+    help=(
+        "How strong the **money-relevant** signal is (rule-based labels; AI may restate in Details). "
+        "Strong = clear liquidity, large capital, or known ultra-wealth context."
+    ),
+)
+
+_liq_present = set(signals_df.get("liquidity_event", pd.Series(dtype=object)).replace("", pd.NA).dropna().unique().tolist())
+_liq_order = ("Yes", "Potential", "No")
+_liq_options = [x for x in _liq_order if x in _liq_present] or list(_liq_order)
+selected_liquidity = st.sidebar.multiselect(
+    "Liquidity event",
+    options=_liq_options,
+    default=_liq_options,
+    help="Whether the story describes cash/stock/realization **now or soon** (Yes / Potential / No).",
+)
+
+_ct_series = signals_df.get("client_type", pd.Series(dtype=object)).fillna("").astype(str).str.strip()
+_ct_opts = sorted({_fa_nonempty(x, fallback="Unknown") for x in _ct_series.tolist() if x is not None})
+if not _ct_opts:
+    _ct_opts = ["Unknown", "Executive", "Founder / Entrepreneur"]
+selected_client_types = st.sidebar.multiselect(
+    "Client type",
+    options=_ct_opts,
+    default=_ct_opts,
+    help="Prospect archetype (same **Client type** field in Details): founder, executive, investor, athlete, heir, etc.",
 )
 
 min_score = st.sidebar.slider(
-    "Minimum score",
+    "Minimum pipeline score",
     min_value=0,
     max_value=100,
     value=TOP_CURATED_MIN_SCORE,
-    help=f"Applies to Home top {HOME_TOP_SIGNALS}, All signals, and Details. Home ranks from the filtered list (AI re-orders among top 20 by score when enabled).",
+    help=(
+        "Internal 0–100 match score (liquidity, role, entities—not outlet prestige). "
+        f"Applies to Home top {HOME_TOP_SIGNALS}, the table, and Details."
+    ),
 )
-
-search_query = st.sidebar.text_input(
-    "Search (person, company, title, role)",
-    placeholder="Filter the feed…",
-    help="Applies everywhere: Home, All signals, and Details (partial match, case-insensitive).",
-).strip()
 
 use_date_filter = st.sidebar.checkbox(
     "Filter by event date",
@@ -1075,6 +1264,16 @@ ensure_columns_present(
         "ai_summary",
         "ai_why_it_matters",
         "ai_outreach",
+        "est_wealth_display",
+        "wealth_rank",
+        "wealth_signal_label",
+        "liquidity_event",
+        "client_type",
+        "source_of_wealth",
+        "ai_wealth_signal",
+        "ai_liquidity_label",
+        "ai_client_who",
+        "ai_why_money",
     ],
 )
 
@@ -1085,19 +1284,18 @@ else:
 
 filtered = filtered[filtered["score"] >= min_score]
 
+if selected_wealth_signals and "wealth_signal_label" in filtered.columns:
+    filtered = filtered[filtered["wealth_signal_label"].isin(selected_wealth_signals)]
+
+if selected_liquidity and "liquidity_event" in filtered.columns:
+    filtered = filtered[filtered["liquidity_event"].isin(selected_liquidity)]
+
+if selected_client_types and "client_type" in filtered.columns:
+    fc = filtered["client_type"].fillna("").astype(str).str.strip().replace("", "Unknown")
+    filtered = filtered[fc.isin(selected_client_types)]
+
 if search_query:
-    sq = search_query
-    pn = filtered.get("person_name", pd.Series([""] * len(filtered))).fillna("").astype(str)
-    cn = filtered.get("company_name", pd.Series([""] * len(filtered))).fillna("").astype(str)
-    rt = filtered.get("raw_title", pd.Series([""] * len(filtered))).fillna("").astype(str)
-    rl = filtered.get("role", pd.Series([""] * len(filtered))).fillna("").astype(str)
-    mask = (
-        pn.str.contains(sq, case=False, na=False, regex=False)
-        | cn.str.contains(sq, case=False, na=False, regex=False)
-        | rt.str.contains(sq, case=False, na=False, regex=False)
-        | rl.str.contains(sq, case=False, na=False, regex=False)
-    )
-    filtered = filtered[mask]
+    filtered = apply_prospect_search(filtered, search_query)
 
 if use_date_filter and date_start is not None and date_end is not None and has_dates:
     day = filtered["event_date"].dt.date
@@ -1143,7 +1341,7 @@ with tab_home:
     with st.container(border=True, key="ws_card_priority"):
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.subheader("Top Signals")
+            st.subheader("Top prospects")
         with col2:
             st.markdown('<div style="height:0.35rem"></div>', unsafe_allow_html=True)
             if st.button(
@@ -1155,8 +1353,9 @@ with tab_home:
                 st.session_state.signals_df = fetch_signals()
                 st.rerun()
         st.caption(
-            f"Up to **{HOME_TOP_SIGNALS}** from your current filters (sidebar). "
-            f"AI picks the best {HOME_TOP_SIGNALS} among the top 20 by score when enabled; otherwise score order."
+            f"Up to **{HOME_TOP_SIGNALS}** prospects from your current sidebar filters. "
+            f"When AI ranking is on, the best {HOME_TOP_SIGNALS} are chosen from the top 20 by pipeline score; "
+            "ranking favors wealth-signal strength and identifiable people, not news outlet prestige."
         )
 
         if len(signals_df) == 0:
@@ -1213,30 +1412,43 @@ with tab_explore:
     # Main table (narrow columns — same data as Details / Home)
     # -----------------------------------------------------------------------------
     _DISPLAY_RENAME = {
-        "person_name": "Person",
+        "person_name": "Name",
+        "role": "Role / title",
         "company_name": "Company",
-        "event_type": "Event",
-        "score": "Score",
-        "target_client": "Target client",
-        "ai_summary": "AI summary (or headline)",
+        "wealth_signal_display": "Wealth signal",
+        "liquidity_display": "Liquidity event",
+        "est_wealth_display": "Est. wealth (display)",
+        "client_type": "Client type",
+        "ai_summary": "AI summary",
     }
-    _NARROW_COLS = ["person_name", "company_name", "event_type", "score", "target_client", "ai_summary"]
+    _NARROW_COLS = [
+        "person_name",
+        "role",
+        "company_name",
+        "wealth_signal_display",
+        "liquidity_display",
+        "est_wealth_display",
+        "client_type",
+        "ai_summary",
+    ]
 
     st.markdown(
         """
     <div class="ws-section-head">
-      <h2 class="ws-h2">All signals</h2>
-      <p class="ws-section-sub">Sorted by score, then quality &amp; confidence. Same search as the sidebar.</p>
+      <h2 class="ws-h2">Prospect table</h2>
+      <p class="ws-section-sub">Same columns as <strong>Details</strong> and the same filters as the sidebar. Sorted by wealth-signal strength, then whether the person is named, then recency—not by outlet.</p>
     </div>
     """,
         unsafe_allow_html=True,
     )
-    st.write(f"Showing **{len(explore_view)}** signal(s) in the explore view (after score ≥ {EXPLORE_MIN_SCORE} and non-Other).")
+    st.write(
+        f"Showing **{len(explore_view)}** prospect row(s) (score ≥ {EXPLORE_MIN_SCORE}, story category not **Other**)."
+    )
 
     if explore_view.empty:
         st.info(
-            "No rows in this view. Try clearing search, widening event types, lowering the minimum score, "
-            f"or note that explore hides **Other** events and scores below **{EXPLORE_MIN_SCORE}**."
+            "No rows in this view. Try clearing search, widening filters, lowering the minimum pipeline score, "
+            f"or note that this view hides **Other** stories and scores below **{EXPLORE_MIN_SCORE}**."
         )
     else:
         display_narrow = explore_view[_NARROW_COLS].copy()
@@ -1246,12 +1458,46 @@ with tab_explore:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Person": st.column_config.TextColumn("Person", width="medium"),
-                "Company": st.column_config.TextColumn("Company", width="medium"),
-                "Event": st.column_config.TextColumn("Event", width="small"),
-                "Score": st.column_config.NumberColumn("Score", format="%d", width="small"),
-                "Target client": st.column_config.TextColumn("Target client", width="small"),
-                "AI summary (or headline)": st.column_config.TextColumn("AI summary (or headline)", width="large"),
+                "Name": st.column_config.TextColumn(
+                    "Name",
+                    width="medium",
+                    help="Identified individual; prospecting target.",
+                ),
+                "Role / title": st.column_config.TextColumn(
+                    "Role / title",
+                    width="medium",
+                    help="Current or stated role (e.g. CEO, founder).",
+                ),
+                "Company": st.column_config.TextColumn(
+                    "Company",
+                    width="medium",
+                    help="Associated company or employer when known.",
+                ),
+                "Wealth signal": st.column_config.TextColumn(
+                    "Wealth signal",
+                    width="small",
+                    help="Strong / Moderate / Weak / None — how clearly the story implies money or liquidity (AI may refine).",
+                ),
+                "Liquidity event": st.column_config.TextColumn(
+                    "Liquidity event",
+                    width="small",
+                    help="Yes / Potential / No — is cash, stock sale, funding, or similar in play?",
+                ),
+                "Est. wealth (display)": st.column_config.TextColumn(
+                    "Est. wealth (display)",
+                    width="small",
+                    help="Parsed or inferred estimate for this row; 'Data pending' when unknown.",
+                ),
+                "Client type": st.column_config.TextColumn(
+                    "Client type",
+                    width="medium",
+                    help="Founder, executive, investor, athlete, heir, etc.",
+                ),
+                "AI summary": st.column_config.TextColumn(
+                    "AI summary",
+                    width="large",
+                    help="Advisor-style summary or headline fallback.",
+                ),
             },
         )
     
@@ -1262,11 +1508,15 @@ with tab_explore:
         st.markdown(
             """
     <div class="ws-section-head">
-      <h2 class="ws-h2">Details Explorer</h2>
-      <p class="ws-section-sub">Uses the <strong>same filtered list</strong> as the table (sidebar search). Sort: best scores first.</p>
+      <h2 class="ws-h2">Details</h2>
+      <p class="ws-section-sub">Same rows as the <strong>Prospect table</strong> and the same filters as the sidebar—one schema everywhere.</p>
     </div>
     """,
             unsafe_allow_html=True,
+        )
+        st.caption(
+            "Fields below match **Find prospects**: Name, Role / title, Company, Wealth signal, Liquidity event, "
+            "estimated wealth, Source of wealth, Client type, and AI copy. Empty values show **Data pending** or **Not identified**."
         )
         st.markdown(
             """<p style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#0f172a;margin:0 0 0.4rem 0;">Filter</p>""",
@@ -1287,7 +1537,7 @@ with tab_explore:
             horizontal=True,
             format_func=_details_priority_label,
             key="details_priority_filter",
-            help="Optional: narrow by outreach priority (same rows as sidebar search).",
+            help="Wealth-based priority: High only when the pipeline finds a strong money or liquidity signal for a targetable person—not general news importance.",
         )
 
         details_filtered = explore_view.copy()
@@ -1327,12 +1577,33 @@ with tab_explore:
                             st.caption(f"Source outlet: {_so}")
                         st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
                         st.markdown(f"**Priority:** {row.get('priority_level', '')}")
+                        _wsl = str(row.get("wealth_signal_label") or "").strip()
+                        _liq = str(row.get("liquidity_event") or "").strip()
+                        _clt = str(row.get("client_type") or "").strip()
+                        _sow = str(row.get("source_of_wealth") or "").strip()
+                        st.markdown(
+                            f"**Wealth signal (rules):** {_wsl or '—'} | **Liquidity event:** {_liq or '—'} | "
+                            f"**Client type:** {_clt or '—'}"
+                        )
+                        if _sow:
+                            st.caption(f"Source of wealth (inferred): {_sow}")
                         st.markdown(f"**Detected:** {det}")
                         _ai_s = str(row.get("ai_summary", "") or "").strip()
                         _ai_w = str(row.get("ai_why_it_matters", "") or "").strip()
                         _ai_o = str(row.get("ai_outreach", "") or "").strip()
-                        if _ai_s or _ai_w or _ai_o:
+                        _ai_ws = str(row.get("ai_wealth_signal") or "").strip()
+                        _ai_lq = str(row.get("ai_liquidity_label") or "").strip()
+                        _ai_who = str(row.get("ai_client_who") or "").strip()
+                        _ai_wm = str(row.get("ai_why_money") or "").strip()
+                        if _ai_s or _ai_w or _ai_o or _ai_ws or _ai_lq or _ai_who or _ai_wm:
                             st.markdown("**AI (advisor context)**")
+                            if _ai_ws or _ai_lq or _ai_who or _ai_wm:
+                                st.markdown(
+                                    f"**Wealth signal:** {_ai_ws or '—'} | **Liquidity:** {_ai_lq or '—'} | "
+                                    f"**Who is the client:** {_ai_who or '—'}"
+                                )
+                                if _ai_wm:
+                                    st.markdown(f"**Why it matters (money):** {_ai_wm}")
                             if _ai_s:
                                 st.markdown(f"**Summary:** {_ai_s}")
                             if _ai_w:
@@ -1356,12 +1627,14 @@ with tab_explore:
                             or str(_tc).strip().upper() == "YES"
                             else ("mid" if _tc == "mid" or str(_tc).lower() == "mid" else "no")
                         )
-                        _ew = float(row.get("estimated_wealth") or 0)
-                        _agg = float(row.get("aggregated_estimated_wealth") or 0)
+                        _ew_disp = str(row.get("est_wealth_display") or "").strip() or format_wealth(
+                            row.get("estimated_wealth")
+                        )
+                        _agg_disp = format_wealth(row.get("aggregated_estimated_wealth"))
                         st.markdown(
                             f"**Wealth score:** {int(row.get('wealth_score', 0) or 0)} | "
-                            f"**Est. wealth (this row):** ${_ew:,.0f} | "
-                            f"**Agg. est. (person):** ${_agg:,.0f} | "
+                            f"**Est. wealth (this row):** {_ew_disp} | "
+                            f"**Agg. est. (person):** {_agg_disp} | "
                             f"**Target client:** {_tc_label}"
                         )
                         st.caption(

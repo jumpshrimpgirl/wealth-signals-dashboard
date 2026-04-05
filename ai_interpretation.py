@@ -1,5 +1,5 @@
 """
-Post-scoring AI layer: adds advisor-facing copy only (does not change scores).
+Post-scoring AI layer: advisor-facing wealth-signal copy (does not change core scores).
 
 Runs on rows with ``score`` >= ``AI_INTERPRETATION_MIN_SCORE`` (default 60).
 Requires ``OPENAI_API_KEY``. Set ``WEALTH_SIGNALS_AI_INTERPRETATION=0`` to disable.
@@ -21,11 +21,19 @@ def _ai_interpretation_enabled() -> bool:
 
 def interpret_signal_with_ai(row: dict[str, Any]) -> dict[str, str]:
     """
-    Return ``ai_summary``, ``ai_why_it_matters``, ``ai_outreach`` for one signal.
+    Return advisor-facing strings for one signal, focused on wealth / liquidity / client identity.
 
-    On missing key / API error / import failure, returns three empty strings.
+    On missing key / API error / import failure, returns empty strings for all keys.
     """
-    out = {"ai_summary": "", "ai_why_it_matters": "", "ai_outreach": ""}
+    out = {
+        "ai_summary": "",
+        "ai_why_it_matters": "",
+        "ai_outreach": "",
+        "ai_wealth_signal": "",
+        "ai_liquidity_label": "",
+        "ai_client_who": "",
+        "ai_why_money": "",
+    }
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key or not _ai_interpretation_enabled():
         return out
@@ -54,16 +62,25 @@ Person: {row.get("person_name", "")}
 Company: {row.get("company_name", "")}
 Role: {row.get("role", "")}
 Event type: {row.get("event_type", "")}
-Score (informational, do not change): {row.get("score", "")}
+Rule-based wealth signal (hint): {row.get("wealth_signal_label", "")}
+Liquidity (hint): {row.get("liquidity_event", "")}
+Client type (hint): {row.get("client_type", "")}
+Score (informational): {row.get("score", "")}
 """
-    prompt = f"""You are helping a financial advisor who focuses on high-net-worth clients (roughly $5M+ investable assets).
+    prompt = f"""You are helping a private banker / financial advisor find high-net-worth client opportunities.
 
-Read the signal below. Explain why this event is relevant for a financial advisor targeting $5M+ clients. Be specific.
+This is NOT general news ranking. Judge only whether the story signals money: existing wealth, new liquidity, or imminent monetization for an identifiable person.
 
-Return JSON with exactly these keys (each a single string, plain text, no markdown):
-- ai_summary: One concise sentence (max ~200 chars) capturing the opportunity for outreach.
-- ai_why_it_matters: 2-4 sentences on why this matters for wealth/advisory context (liquidity, concentration, planning triggers, etc.).
-- ai_outreach: One concrete suggested line or angle for a respectful first touch (not generic platitudes).
+Return JSON with exactly these keys (each a single plain-text string, no markdown):
+- ai_summary: One sentence: the wealth opportunity in advisor language (max ~220 chars).
+- ai_why_it_matters: 2-3 sentences: liquidity, concentration, planning triggers, tax, or succession — money-focused.
+- ai_outreach: One respectful first-touch line (not generic congratulations).
+- ai_wealth_signal: Exactly one of: Strong | Moderate | Weak | None
+- ai_liquidity_label: Exactly one of: Yes | No | Potential
+- ai_client_who: Who is the prospective client — "Name, Role" or best available; if unclear say "Unknown individual".
+- ai_why_money: Exactly one sentence: why this matters for money (not politics, not outlet prestige).
+
+Do NOT rank or praise the news outlet. BBC/Reuters/etc. credibility does not increase client value.
 
 Signal context:
 {context}
@@ -102,7 +119,15 @@ News content:
     if not isinstance(data, dict):
         return out
 
-    for key in ("ai_summary", "ai_why_it_matters", "ai_outreach"):
+    for key in (
+        "ai_summary",
+        "ai_why_it_matters",
+        "ai_outreach",
+        "ai_wealth_signal",
+        "ai_liquidity_label",
+        "ai_client_who",
+        "ai_why_money",
+    ):
         v = data.get(key, "")
         out[key] = str(v).strip() if v is not None else ""
 
@@ -117,7 +142,15 @@ def enrich_dataframe_with_ai_interpretation(df):  # pd.DataFrame
         return df
 
     out = df.copy()
-    for c in ("ai_summary", "ai_why_it_matters", "ai_outreach"):
+    for c in (
+        "ai_summary",
+        "ai_why_it_matters",
+        "ai_outreach",
+        "ai_wealth_signal",
+        "ai_liquidity_label",
+        "ai_client_who",
+        "ai_why_money",
+    ):
         if c not in out.columns:
             out[c] = ""
         out[c] = out[c].fillna("").astype(str)
@@ -139,11 +172,27 @@ def enrich_dataframe_with_ai_interpretation(df):  # pd.DataFrame
             d = interpret_signal_with_ai(row.to_dict())
         except Exception:
             continue
-        for k in ("ai_summary", "ai_why_it_matters", "ai_outreach"):
+        for k in (
+            "ai_summary",
+            "ai_why_it_matters",
+            "ai_outreach",
+            "ai_wealth_signal",
+            "ai_liquidity_label",
+            "ai_client_who",
+            "ai_why_money",
+        ):
             if k in d and d[k]:
                 out.at[idx, k] = d[k]
 
-    for c in ("ai_summary", "ai_why_it_matters", "ai_outreach"):
+    for c in (
+        "ai_summary",
+        "ai_why_it_matters",
+        "ai_outreach",
+        "ai_wealth_signal",
+        "ai_liquidity_label",
+        "ai_client_who",
+        "ai_why_money",
+    ):
         out[c] = out[c].fillna("").astype(str).str.strip()
 
     return out

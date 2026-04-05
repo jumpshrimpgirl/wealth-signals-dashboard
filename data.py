@@ -22,7 +22,19 @@ import requests
 from ai_extraction import extract_signal_with_ai
 from ai_interpretation import enrich_dataframe_with_ai_interpretation
 from person_validation import is_valid_person
-from score import apply_scores, clamp_score_0_100, compute_signal_score
+from score import (
+    apply_scores,
+    clamp_score_0_100,
+    classify_client_type,
+    classify_liquidity_event,
+    classify_wealth_signal_strength,
+    compute_signal_score,
+    derive_wealth_priority_level,
+    infer_source_of_wealth,
+    is_macro_noise_without_wealth_hook,
+    passes_wealth_high_priority_gate,
+    wealth_signal_rank,
+)
 
 # When True, ``finalize_dataframe`` emits one row per detected person (shared headline / URL).
 SPLIT_SIGNAL_ROWS_PER_PERSON = False
@@ -61,6 +73,7 @@ REQUIRED_COLUMNS = [
     "weak_signal",
     "wealth_score",
     "estimated_wealth",
+    "est_wealth_display",
     "aggregated_estimated_wealth",
     "target_client",
     "is_billionaire",
@@ -70,6 +83,16 @@ REQUIRED_COLUMNS = [
     "repeat_person",
     "linked_wealth_signal",
     "repeat_company",
+    "wealth_passes_gate",
+    "wealth_signal_label",
+    "liquidity_event",
+    "client_type",
+    "source_of_wealth",
+    "wealth_rank",
+    "ai_wealth_signal",
+    "ai_liquidity_label",
+    "ai_client_who",
+    "ai_why_money",
 ]
 
 # -----------------------------------------------------------------------------
@@ -875,7 +898,7 @@ def why_it_matters_for_event_type(event_type: str) -> str:
         "Funding": "New funding can reshape equity, hiring, and future payout potential.",
         "Promotion": "Senior moves usually reflect expanded scope and compensation upside.",
         "Board Appointment": "Board roles can bring fees, equity, and strategic influence.",
-        "Other": "General business or markets news - may still be a timely reason to reach out.",
+        "Other": "Only pursue if a clear money, liquidity, or concentration angle appears — not general headlines.",
     }
     et = (event_type or "").strip()
     return blurbs.get(et, "Public career and finance news may signal changing wealth dynamics.")
@@ -1084,7 +1107,8 @@ def dedupe_signals_cross_source(out: pd.DataFrame) -> pd.DataFrame:
     - Empty ``person_name``: key = ``raw_title``; if title is empty, fall back to ``source_url``
       so unnamed rows without a title do not collapse into one bucket.
 
-    Keeps the row with the highest ``score`` (then ``confidence_score``, then ``event_date``).
+    Keeps the row with the strongest wealth signal (then recency, extraction clarity, score).
+    Source outlet is not a ranking factor.
     """
     if out.empty:
         return out
@@ -1105,11 +1129,19 @@ def dedupe_signals_cross_source(out: pd.DataFrame) -> pd.DataFrame:
     key.loc[no_title] = "u\x01" + su[no_title]
 
     o["_dedupe_key"] = key
+    if "quality_score" not in o.columns:
+        o["quality_score"] = 0
+    o["quality_score"] = pd.to_numeric(o["quality_score"], errors="coerce").fillna(0).astype(int)
+    if "wealth_rank" not in o.columns:
+        o["wealth_rank"] = 3
+    o["wealth_rank"] = pd.to_numeric(o["wealth_rank"], errors="coerce").fillna(3).astype(int)
+    o["_person_id"] = (pn != "").astype(int)
     o = o.sort_values(
-        by=["score", "confidence_score", "event_date"],
-        ascending=[False, False, False],
+        by=["wealth_rank", "_person_id", "event_date", "quality_score", "score"],
+        ascending=[True, False, False, False, False],
         na_position="last",
     )
+    o = o.drop(columns=["_person_id"], errors="ignore")
     o = o.drop_duplicates(subset=["_dedupe_key"], keep="first")
     return o.drop(columns=["_dedupe_key"], errors="ignore").reset_index(drop=True)
 
@@ -1953,12 +1985,61 @@ def merge_target_client_row(
     return False
 
 
+def format_wealth(value) -> str:
+    """Format estimated USD for display; None / NaN / zero → ``Data pending``."""
+    if value is None:
+        return "Data pending"
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "Data pending"
+    if pd.isna(v) or v == 0:
+        return "Data pending"
+    if v >= 1_000_000_000:
+        return f"${v / 1_000_000_000:.1f}B"
+    if v >= 1_000_000:
+        return f"${v / 1_000_000:.1f}M"
+    return f"${v:,.0f}"
+
+
 def normalize_name(name: str) -> str:
     """Stable key for cross-article person matching (lowercase, collapsed whitespace)."""
     s = (name or "").strip().lower()
     if not s:
         return ""
     return re.sub(r"\s+", " ", s)
+
+
+def infer_wealth(row: pd.Series) -> float:
+    """Coarse headline-based USD hint when deal parsing yields little or nothing."""
+    title = str(row.get("raw_title", "") or "").lower()
+
+    if "sold" in title or "acquired" in title:
+        return 5_000_000.0
+    if "raised" in title:
+        return 1_000_000.0
+    if "ceo" in title or "chief" in title:
+        return 2_000_000.0
+    return 0.0
+
+
+KNOWN_BILLIONAIRES: dict[str, float] = {
+    "larry ellison": 225_000_000_000,
+    "elon musk": 700_000_000_000,
+    "jeff bezos": 250_000_000_000,
+    "mark zuckerberg": 220_000_000_000,
+}
+
+
+def enrich_known_wealth(row: pd.Series) -> float:
+    """Override deal-derived estimate when ``person_name`` matches a hand-curated net worth."""
+    name = normalize_name(str(row.get("person_name", "") or ""))
+    if name in KNOWN_BILLIONAIRES:
+        return float(KNOWN_BILLIONAIRES[name])
+    try:
+        return float(row.get("estimated_wealth", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def assign_aggregated_estimated_wealth(out: pd.DataFrame) -> None:
@@ -2447,6 +2528,90 @@ def _is_relevant_signal(
     return _article_row_should_keep(text_blob, person_name, company_name)
 
 
+def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
+    """
+    Populate wealth-signal fields and ``priority_level`` from HNWI / liquidity rules.
+
+    HIGH priority requires ``passes_wealth_high_priority_gate`` (has / made / about to make money).
+    """
+    if out.empty:
+        return
+    for idx in out.index:
+        r = out.loc[idx]
+        blob = f"{r.get('raw_title', '')} {r.get('full_explanation', '')}"
+        gate = passes_wealth_high_priority_gate(
+            raw_title=str(r.get("raw_title", "")),
+            full_explanation=str(r.get("full_explanation", "")),
+            event_type=str(r.get("event_type", "")),
+            role=str(r.get("role", "")),
+            estimated_wealth=float(r.get("estimated_wealth") or 0),
+            aggregated_estimated_wealth=float(r.get("aggregated_estimated_wealth") or 0),
+            funding_amount=str(r.get("funding_amount", "")),
+            funding_stage=str(r.get("funding_stage", "")),
+            is_billionaire=bool(r.get("is_billionaire", False)),
+        )
+        macro = is_macro_noise_without_wealth_hook(
+            blob,
+            float(r.get("estimated_wealth") or 0),
+            bool(r.get("is_billionaire", False)),
+            gate,
+        )
+        strength = classify_wealth_signal_strength(
+            raw_title=str(r.get("raw_title", "")),
+            full_explanation=str(r.get("full_explanation", "")),
+            event_type=str(r.get("event_type", "")),
+            role=str(r.get("role", "")),
+            estimated_wealth=float(r.get("estimated_wealth") or 0),
+            aggregated_estimated_wealth=float(r.get("aggregated_estimated_wealth") or 0),
+            is_billionaire=bool(r.get("is_billionaire", False)),
+            linked_wealth_signal=bool(r.get("linked_wealth_signal", False)),
+            funding_amount=str(r.get("funding_amount", "")),
+            funding_stage=str(r.get("funding_stage", "")),
+            weak_signal=bool(r.get("weak_signal", False)),
+        )
+        liq = classify_liquidity_event(
+            str(r.get("event_type", "")),
+            str(r.get("raw_title", "")),
+            str(r.get("full_explanation", "")),
+            str(r.get("funding_amount", "")),
+            str(r.get("funding_stage", "")),
+        )
+        ctype = classify_client_type(
+            str(r.get("role", "")),
+            str(r.get("event_type", "")),
+            str(r.get("raw_title", "")),
+        )
+        ch = str(r.get("client_type_hint", "") or "").strip()
+        if ch and "unknown" not in ch.lower():
+            ctype = ch
+        sow = infer_source_of_wealth(
+            str(r.get("event_type", "")),
+            str(r.get("raw_title", "")),
+            str(r.get("full_explanation", "")),
+        )
+        sh = str(r.get("source_of_wealth_hint", "") or "").strip()
+        if sh:
+            sow = sh
+        wr = wealth_signal_rank(strength)
+        sc = int(pd.to_numeric(r.get("score"), errors="coerce") or 0)
+        pl = derive_wealth_priority_level(
+            score=sc,
+            passes_gate=gate,
+            strength=strength,
+            liquidity=liq,
+            macro_noise=macro,
+            weak_signal=bool(r.get("weak_signal", False)),
+            is_billionaire=bool(r.get("is_billionaire", False)),
+        )
+        out.at[idx, "wealth_passes_gate"] = bool(gate)
+        out.at[idx, "wealth_signal_label"] = strength
+        out.at[idx, "liquidity_event"] = liq
+        out.at[idx, "client_type"] = ctype
+        out.at[idx, "source_of_wealth"] = sow
+        out.at[idx, "wealth_rank"] = int(wr)
+        out.at[idx, "priority_level"] = pl
+
+
 def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize a signals table so the UI always gets safe, consistent data.
@@ -2604,6 +2769,13 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             axis=1,
         )
         out["estimated_wealth"] = _deal_tuples.map(lambda t: float(t[0])).astype(float)
+        out["estimated_wealth"] = out.apply(
+            lambda row: row["estimated_wealth"]
+            if float(row["estimated_wealth"] or 0) > 0
+            else infer_wealth(row),
+            axis=1,
+        ).astype(float)
+        out["estimated_wealth"] = out.apply(enrich_known_wealth, axis=1).astype(float)
         assign_aggregated_estimated_wealth(out)
         out["target_client"] = out.apply(
             lambda row: merge_target_client_row(
@@ -2636,14 +2808,24 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         out["repeat_person"] = False
         out["linked_wealth_signal"] = False
         out["repeat_company"] = False
+        out["wealth_passes_gate"] = False
+        out["wealth_signal_label"] = "None"
+        out["liquidity_event"] = "No"
+        out["client_type"] = ""
+        out["source_of_wealth"] = ""
+        out["wealth_rank"] = 3
+        out["priority_level"] = "Low"
+        out["ai_wealth_signal"] = ""
+        out["ai_liquidity_label"] = ""
+        out["ai_client_who"] = ""
+        out["ai_why_money"] = ""
 
-    # --- Action layer: who to prioritize and what to say (derived from score + event_type) ---
+    # --- Wealth-signal priority (HNWI / liquidity; not general news importance) ---
+    if not out.empty:
+        _apply_wealth_signal_metadata(out)
+
+    # --- Action layer: outreach copy (priority comes from ``_apply_wealth_signal_metadata``) ---
     out["outreach_angle"] = out.apply(generate_outreach_angle, axis=1)
-    out["priority_level"] = out["score"].apply(priority_level_from_score)
-    if not out.empty and "target_client" in out.columns and "is_billionaire" in out.columns:
-        _tc_hi = out["target_client"].map(_target_client_is_high_value).fillna(False).astype(bool)
-        _hi = _tc_hi | out["is_billionaire"].astype(bool)
-        out.loc[_hi, "priority_level"] = "High"
     out["suggested_next_step"] = out["priority_level"].apply(suggested_next_step_from_priority)
 
     for col in (
@@ -2654,6 +2836,14 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         "ai_summary",
         "ai_why_it_matters",
         "ai_outreach",
+        "wealth_signal_label",
+        "liquidity_event",
+        "client_type",
+        "source_of_wealth",
+        "ai_wealth_signal",
+        "ai_liquidity_label",
+        "ai_client_who",
+        "ai_why_money",
     ):
         if col in out.columns:
             out[col] = out[col].fillna("").astype(str).str.strip()
@@ -2669,11 +2859,17 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Dedupe URLs: keep strongest row per URL ---
     if not out.empty and "source_url" in out.columns:
+        if "wealth_rank" not in out.columns:
+            out["wealth_rank"] = 3
+        out["wealth_rank"] = pd.to_numeric(out["wealth_rank"], errors="coerce").fillna(3).astype(int)
+        _pn = out["person_name"].fillna("").astype(str).str.strip()
+        out["_person_id"] = (_pn != "").astype(int)
         out = out.sort_values(
-            ["confidence_score", "score", "event_date"],
-            ascending=[False, False, False],
+            ["wealth_rank", "_person_id", "event_date", "quality_score", "score"],
+            ascending=[True, False, False, False, False],
             na_position="last",
         )
+        out = out.drop(columns=["_person_id"], errors="ignore")
         before = len(out)
         if SPLIT_SIGNAL_ROWS_PER_PERSON:
             out = out.drop_duplicates(subset=["source_url", "person_name"], keep="first")
@@ -2690,6 +2886,11 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     if not out.empty and "weak_signal" in out.columns:
         out["weak_signal"] = out["weak_signal"].fillna(False).astype(bool)
+
+    if "estimated_wealth" in out.columns:
+        out["est_wealth_display"] = out["estimated_wealth"].map(format_wealth)
+    else:
+        out["est_wealth_display"] = "Data pending"
 
     return out[REQUIRED_COLUMNS].reset_index(drop=True)
 
@@ -3234,7 +3435,7 @@ def _merge_ai_extraction_for_row(
     company: str,
     role: str,
     event_type: str,
-) -> tuple[str, list[str], str, str, str]:
+) -> tuple[str, list[str], str, str, str, str, str]:
     """
     Hybrid extraction: regex/heuristics first; if ``person_name`` fails validation, call AI
     and **replace** ``person_name``, ``company_name``, ``role``, and ``event_type`` with the
@@ -3242,9 +3443,9 @@ def _merge_ai_extraction_for_row(
     useful, keep regex fields unchanged.
     """
     if not _ai_extraction_enabled() or not os.environ.get("OPENAI_API_KEY", "").strip():
-        return person, extra_people, company, role, event_type
+        return person, extra_people, company, role, event_type, "", ""
     if not _person_name_fails_validation(person):
-        return person, extra_people, company, role, event_type
+        return person, extra_people, company, role, event_type, "", ""
     # Prefer article body first so downstream truncation keeps real paragraphs over the title.
     chunks = [article_text, title, summary]
     combined = "\n\n".join(c for c in chunks if (c or "").strip()).strip()
@@ -3252,7 +3453,7 @@ def _merge_ai_extraction_for_row(
         combined = title
     parsed = extract_signal_with_ai(combined)
     if not parsed:
-        return person, extra_people, company, role, event_type
+        return person, extra_people, company, role, event_type, "", ""
 
     # Full overwrite from AI for structured fields (regex extras dropped — single AI snapshot)
     person = str(parsed.get("person_name", "") or "").strip()
@@ -3262,7 +3463,9 @@ def _merge_ai_extraction_for_row(
     et_ai = str(parsed.get("event_type", "") or "").strip()
     if et_ai:
         event_type = et_ai
-    return person, extra_people, company, role, event_type
+    ct = str(parsed.get("client_type", "") or "").strip()
+    sow = str(parsed.get("source_of_wealth", "") or "").strip()
+    return person, extra_people, company, role, event_type, ct, sow
 
 
 def _fetch_one_feed(url: str) -> list[Any]:
@@ -3320,8 +3523,10 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         role = _guess_role(extraction_text)
 
         # 2) If person_name missing or invalid → AI fallback; 3) overwrite with AI output when used
-        person, extra_people, company, role, event_type_merged = _merge_ai_extraction_for_row(
-            title, article_paragraphs, summary, person, extra_people, company, role, legacy_et
+        person, extra_people, company, role, event_type_merged, client_type_hint, source_of_wealth_hint = (
+            _merge_ai_extraction_for_row(
+                title, article_paragraphs, summary, person, extra_people, company, role, legacy_et
+            )
         )
 
         if not _article_row_should_keep(blob_for_filter, person, company):
@@ -3352,6 +3557,8 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                 "confidence_score": 0,
                 "is_relevant": True,
                 "weak_signal": weak_signal,
+                "client_type_hint": client_type_hint,
+                "source_of_wealth_hint": source_of_wealth_hint,
             }
         )
 

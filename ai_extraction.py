@@ -83,19 +83,22 @@ def extract_signal_with_ai(text: str) -> dict[str, Any]:
         truncated = truncated[:max_chars] + "\n…"
 
     prompt = f"""
-Extract structured information from this news text.
+Extract structured information from this news text for a financial-advisor wealth-signals feed.
 
 Return JSON with:
 - person_name (real human only; use empty string if none)
 - company_name
 - role
 - event_type (one of: Founder Exit, Funding, Promotion, Board Appointment, Other)
+- client_type (one of: Founder / Entrepreneur | Executive | Investor (PE/VC/HF) | Athlete / Celebrity | Heir / Family wealth | unknown)
+- source_of_wealth (short phrase if inferable, e.g. "company sale", "IPO", "funding round", "compensation"; else empty string)
 
 Rules:
 - Only return real people (not companies, not cities)
 - Ignore journalists
 - Ignore vague phrases
 - If unsure, leave the field blank (empty string)
+- Prefer wealth-relevant roles (founder, CEO, investor) when multiple people appear
 
 Text:
 {truncated}
@@ -139,5 +142,10 @@ Text:
     et_raw = str(data.get("event_type", "") or "").strip()
     et = _normalize_ai_event_type(et_raw)
     out["event_type"] = et if et else (et_raw if et_raw in _CANONICAL_EVENT_TYPES else "Other")
+
+    ct = str(data.get("client_type", "") or "").strip()
+    out["client_type"] = ct if ct else ""
+    sow = str(data.get("source_of_wealth", "") or "").strip()
+    out["source_of_wealth"] = sow if sow else ""
 
     return out
