@@ -488,12 +488,17 @@ def classify_wealth_status(
 # 2) AI extraction — structured JSON (OpenAI)
 # =============================================================================
 _CANDIDATE_SCHEMA: dict[str, Any] = {
-    "name": "wealth_article_v4",
+    "name": "wealth_article_v5",
     "strict": True,
     "schema": {
         "type": "object",
         "properties": {
             "article_topic": {"type": "string"},
+            "candidate_people": {"type": "array", "items": {"type": "string"}},
+            "candidate_companies": {"type": "array", "items": {"type": "string"}},
+            "candidate_roles": {"type": "array", "items": {"type": "string"}},
+            "event_type": {"type": "string"},
+            "money_mentions": {"type": "array", "items": {"type": "string"}},
             "candidates": {
                 "type": "array",
                 "items": {
@@ -562,7 +567,15 @@ _CANDIDATE_SCHEMA: dict[str, Any] = {
                 },
             },
         },
-        "required": ["article_topic", "candidates"],
+        "required": [
+            "article_topic",
+            "candidate_people",
+            "candidate_companies",
+            "candidate_roles",
+            "event_type",
+            "money_mentions",
+            "candidates",
+        ],
         "additionalProperties": False,
     },
 }
@@ -591,6 +604,13 @@ Article body:
 ---
 {body}
 ---
+
+Also at the top level, fill:
+- candidate_people: distinct person names (strings only).
+- candidate_companies: organization names mentioned.
+- candidate_roles: role phrases (CEO, founder, etc.) as they appear.
+- event_type: one label for the main story (e.g. Funding, M&A, Executive change, Other).
+- money_mentions: short strings for major $ figures (deal/funding/revenue — not personal NW).
 
 Task:
 - For each notable entity, set entity_type: person | company | product | organization | region | event | unknown.
@@ -635,6 +655,35 @@ Return strict JSON only (schema enforced)."""
         return None
     if "candidates" not in data:
         return None
+    # v5 extraction lists — backfill from candidates if older cache
+    if not data.get("candidate_people"):
+        data["candidate_people"] = [
+            str(c.get("name") or "").strip()
+            for c in (data.get("candidates") or [])
+            if isinstance(c, dict)
+            and str(c.get("entity_type") or "").lower() == "person"
+            and c.get("is_valid_prospect_person")
+        ]
+    if not data.get("candidate_companies"):
+        data["candidate_companies"] = list(
+            dict.fromkeys(
+                str(c.get("company") or "").strip()
+                for c in (data.get("candidates") or [])
+                if isinstance(c, dict) and str(c.get("company") or "").strip()
+            )
+        )[:24]
+    if not data.get("candidate_roles"):
+        data["candidate_roles"] = list(
+            dict.fromkeys(
+                str(c.get("role") or "").strip()
+                for c in (data.get("candidates") or [])
+                if isinstance(c, dict) and str(c.get("role") or "").strip()
+            )
+        )[:24]
+    if not data.get("event_type"):
+        data["event_type"] = "Other"
+    if not data.get("money_mentions"):
+        data["money_mentions"] = []
     # Normalize cache / older payloads → v4 fields
     out_c: list[dict[str, Any]] = []
     for c in data.get("candidates") or []:
@@ -709,7 +758,7 @@ _AI_MEM: dict[str, dict[str, Any]] = {}
 
 def _ai_disk_path(key: str) -> Path:
     _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    return _CACHE_ROOT / f"ai_extract_v4_{key}.json"
+    return _CACHE_ROOT / f"ai_extract_v5_{key}.json"
 
 
 def extract_candidates_with_ai_cached(

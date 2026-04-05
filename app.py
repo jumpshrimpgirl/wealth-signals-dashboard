@@ -997,18 +997,17 @@ def render_home_signal_card(row: pd.Series) -> None:
     _sig_t = str(row.get("signal_type") or row.get("event_type") or "").strip()
     _co_disp = str(row.get("company_name") or row.get("company") or "").strip()
     _ew = str(row.get("est_wealth_display") or row.get("est_wealth") or "").strip()
+    _cl = str(row.get("client_likelihood") or "Medium").strip()
+    _why_fa = str(row.get("why_this_matters_fa") or row.get("article_relevance_reason") or "").strip()
     _tplab = row.get("top5_score")
     try:
         _has_top5 = _tplab is not None and not pd.isna(_tplab)
     except Exception:
         _has_top5 = bool(_tplab)
     if _has_top5:
-        _ps = _safe_int_from_cell(_tplab, 0)
         _plab = str(row.get("home_priority_label") or row.get("priority_label") or "").strip()
     else:
-        _ps = _safe_int_from_cell(row.get("priority_score", row.get("score")), 0)
         _plab = str(row.get("priority_label") or row.get("priority_level") or "").strip()
-    _score_note = "Confidence"
     with st.container(border=True):
         c1, c2 = st.columns([3, 1])
         with c1:
@@ -1018,11 +1017,19 @@ def render_home_signal_card(row: pd.Series) -> None:
             )
             _co_html = html.escape(_co_disp) if _co_disp else "—"
             _ew_html = html.escape(_ew) if _ew else "—"
+            _cl_html = html.escape(_cl) if _cl else "—"
+            _why_html = html.escape(_why_fa) if _why_fa else ""
             st.markdown(
                 f"""<p class="ws-card-line">{event_type_badge_html(_sig_t)} {priority_badge_html(_plab)} | """
-                f"""{_score_note}: {_ps} | {_co_html} | Wealth: {_ew_html}</p>""",
+                f"""Client likelihood: {_cl_html} | {_co_html} | Wealth: {_ew_html}</p>""",
                 unsafe_allow_html=True,
             )
+            if _why_html:
+                st.markdown(
+                    f"""<p class="ws-card-line" style="font-size:0.92rem;color:#E5E7EB;">"""
+                    f"""<strong>Why this matters:</strong> {_why_html}</p>""",
+                    unsafe_allow_html=True,
+                )
             st.markdown(
                 f"""<p class="ws-card-line" style="font-size:0.9rem;color:#9CA3AF;">{out_e}</p>""",
                 unsafe_allow_html=True,
@@ -1032,7 +1039,12 @@ def render_home_signal_card(row: pd.Series) -> None:
                 unsafe_allow_html=True,
             )
         with c2:
+            _ps = _safe_int_from_cell(
+                row.get("top5_score") if _has_top5 else row.get("priority_score", row.get("score")),
+                0,
+            )
             st.markdown(
+                f"""<p style="text-align:right;margin:0;font-size:0.85rem;color:#9CA3AF;">Priority</p>"""
                 f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{_ps}</p>""",
                 unsafe_allow_html=True,
             )

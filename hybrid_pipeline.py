@@ -675,6 +675,13 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         is_valid_person_name,
         sanitize_role_and_company,
     )
+    from ai_client_pipeline import (
+        client_relevance_to_priority_boost,
+        enrich_client_with_ai_cached,
+        validate_person_with_ai_cached,
+        wealth_range_to_display_label,
+    )
+    from prospect_guardrails import hard_guardrails_pass
     from prospect_resolution import (
         derive_wealth_fields,
         infer_signal_type,
@@ -732,8 +739,20 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     if not article_economic:
         weak_primary = True
 
+    use_client_ai = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+    extraction_snapshot = {
+        "article_topic": ai_payload.get("article_topic"),
+        "candidate_people": ai_payload.get("candidate_people"),
+        "candidate_companies": ai_payload.get("candidate_companies"),
+        "candidate_roles": ai_payload.get("candidate_roles"),
+        "event_type": ai_payload.get("event_type"),
+        "money_mentions": ai_payload.get("money_mentions"),
+    }
+
     out: list[dict[str, Any]] = []
     for c in candidates:
+        val: dict[str, Any] | None = None
+        enrich: dict[str, Any] | None = None
         et_raw = str(c.get("entity_type") or "").lower()
         if et_raw in ("company", "product", "organization", "region", "event"):
             continue
@@ -745,7 +764,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if is_invalid_candidate_name(name, str(c.get("entity_type") or ""), summary):
             continue
-        if not is_valid_person_name(name, summary):
+        if not use_client_ai and not is_valid_person_name(name, summary):
             continue
         if not hard_filter_entity(
             {
@@ -763,6 +782,27 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         ctx_t = str(c.get("context_type") or "mention")
         eco_r = str(c.get("economic_role") or "other")
 
+        if use_client_ai:
+            val = validate_person_with_ai_cached(summary, name, source_url)
+            if not val:
+                continue
+            if not val.get("is_real_person"):
+                continue
+            if int(val.get("confidence") or 0) < 70:
+                continue
+            if not val.get("is_primary_subject"):
+                continue
+            name = str(val.get("clean_name") or name).strip()
+            role_a = str(val.get("role") or role_a).strip()
+            co_a = str(val.get("company") or co_a).strip()
+            c = {**c, "name": name, "role": role_a, "company": co_a}
+
+        if not is_valid_person_name(name, summary):
+            continue
+
+        if not hard_guardrails_pass(name, co_a, role_a, summary):
+            continue
+
         cc = cross_check_identity_and_wealth(
             name,
             co_a,
@@ -778,6 +818,16 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
 
         role_san, co_san, _ = sanitize_role_and_company(c, summary, cc)
         cc = {**cc, "canonical_company": co_san, "canonical_role": role_san}
+
+        if use_client_ai and val:
+            enrich = enrich_client_with_ai_cached(
+                summary,
+                clean_name=str(cc.get("canonical_name") or name).strip(),
+                role=str(cc.get("canonical_role") or role_san).strip(),
+                company=str(cc.get("canonical_company") or co_san).strip(),
+                validation_confidence=int(val.get("confidence") or 0),
+                source_url=source_url,
+            )
 
         fwc = score_founder_wealth_creation(summary, c, cc)
         priv = score_private_company_context(summary, c, cc)
@@ -807,6 +857,11 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         if not article_economic and not strong_founder_ops:
             prio = min(prio, 74)
         prio = max(0, min(100, prio))
+        if enrich:
+            prio = min(
+                100,
+                prio + client_relevance_to_priority_boost(str(enrich.get("client_relevance") or "")),
+            )
 
         wstat_pre = classify_wealth_status(summary, c, cc)
         dw = derive_wealth_fields(c, na, cc, wealth_status_hint=wstat_pre)
@@ -814,6 +869,15 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         est_display = str(dw.get("est_wealth") or "Data pending")
         wealth_confidence = int(dw.get("wealth_confidence") or 0)
         wealth_numeric_verified = bool(dw.get("wealth_numeric_verified"))
+        if enrich:
+            band = wealth_range_to_display_label(str(enrich.get("estimated_wealth_range") or "medium"))
+            if wealth_numeric_verified:
+                est_display = f"{est_display} ({band})"
+            else:
+                est_display = band
+            wc_en = int(enrich.get("wealth_confidence") or 0)
+            if wc_en > 0:
+                wealth_confidence = max(wealth_confidence, wc_en)
 
         prospect_tier = classify_prospect_tier(
             c,
@@ -903,6 +967,11 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             "commentary_only_row": commentary_only_row,
             "normalized_article": na,
             "parse_ok": bool(na.get("_parse_ok")),
+            "extraction_snapshot": extraction_snapshot,
+            "entity_validation": val,
+            "client_enrichment": enrich,
+            "client_likelihood": str((enrich or {}).get("client_relevance") or "medium").strip().title(),
+            "why_this_matters_fa": str((enrich or {}).get("reason") or c.get("reason") or "").strip(),
         }
         if SHOW_DEBUG:
             legacy["debug_signal_reasons"] = clean.get("_debug_signal_reasons", "")
