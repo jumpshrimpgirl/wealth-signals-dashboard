@@ -139,7 +139,7 @@ def generate_outreach_angle(row) -> str:
         elif has_company:
             return f"Discuss market updates related to {company}."
         else:
-            return "Acknowledge the news — offer relevant planning context."
+            return "Acknowledge the news - offer relevant planning context."
 
 
 def priority_level_from_score(score: Any) -> str:
@@ -178,7 +178,7 @@ def why_it_matters_for_event_type(event_type: str) -> str:
         "Funding": "New funding can reshape equity, hiring, and future payout potential.",
         "Promotion": "Senior moves usually reflect expanded scope and compensation upside.",
         "Board Appointment": "Board roles can bring fees, equity, and strategic influence.",
-        "Other": "General business or markets news — may still be a timely reason to reach out.",
+        "Other": "General business or markets news - may still be a timely reason to reach out.",
     }
     et = (event_type or "").strip()
     return blurbs.get(et, "Public career and finance news may signal changing wealth dynamics.")

@@ -1,4 +1,13 @@
-"""
+
+
+
+
+
+
+
+
+
+
 Wealth Signals Dashboard - Streamlit UI.
 
 Run: streamlit run app.py
@@ -269,10 +278,10 @@ def inject_styles() -> None:
     background: #fff;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   }
-
-
-def human_time_ago(ts) -> str:
-    """
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
     Turn a timestamp into a short, human phrase (e.g. '2 hours ago', '1 day ago').
     """
     if ts is None or pd.isna(ts):
@@ -820,19 +829,19 @@ for _, row in details_filtered.iterrows():
             f'<p style="margin:0 0 0.75rem 0;">{new_html} {priority_badge_html(row["priority_level"])}</p>',
             unsafe_allow_html=True,
         )
-        st.markdown(f"**Raw title:** {row.get('raw_title', '—')}")
+        st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
         st.markdown(f"**Priority:** {row['priority_level']}")
         st.markdown(f"**Detected:** {det}")
         st.markdown(f"**Outreach suggestion:** {row['outreach_angle']}")
         st.markdown(f"**Suggested next step:** {row['suggested_next_step']}")
         st.markdown("---")
-        st.markdown(f"**Role:** {row['role'] or '—'}")
+        st.markdown(f"**Role:** {row['role'] or '-'}")
         st.markdown(f"**Date:** {date_str}")
         st.markdown(f"**Score:** {int(row['score'])}")
         st.markdown("**Why it matters**")
         st.write(row["why_it_matters"])
         st.markdown("**Full explanation**")
-        st.write(row["full_explanation"] or "—")
+        st.write(row["full_explanation"] or "-")
         st.markdown("**Source**")
         st.markdown(f"[Open public source]({row['source_url']})")
 
