@@ -21,6 +21,8 @@ NEW_WINDOW_HOURS = 48
 
 # Curated hero blocks: score floor (full table uses sidebar minimum score only)
 TOP_CURATED_MIN_SCORE = 40
+# Homepage tab: max signals to show (ranked)
+HOME_TOP_SIGNALS = 5
 
 # Hero sections: core event types rank above "Other" (do not use categorical sort — it reversed order).
 EVENT_TYPE_RANK = {
@@ -705,7 +707,7 @@ min_score = st.sidebar.slider(
     min_value=0,
     max_value=100,
     value=TOP_CURATED_MIN_SCORE,
-    help=f"Applies to the All signals table and Details (no hidden floor). Hero sections use score ≥ {TOP_CURATED_MIN_SCORE}.",
+    help=f"Applies to Home top {HOME_TOP_SIGNALS}, All signals, and Details. Home also prefers score ≥ {TOP_CURATED_MIN_SCORE} when picking highlights.",
 )
 
 sort_by = st.sidebar.radio(
@@ -832,207 +834,121 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
         st.caption("No rows match filters — widen event types or lower the minimum score.")
 
 # -----------------------------------------------------------------------------
-# Top high priority opportunities (action layer - who to act on first)
-# -----------------------------------------------------------------------------
-with st.container(border=True, key="ws_card_priority"):
-    st.markdown(
-        f"""
-<div class="ws-section-head">
-  <h2 class="ws-h2">Top high priority opportunities</h2>
-  <p class="ws-section-sub">Curated list: score ≥ {TOP_CURATED_MIN_SCORE} (ranked for outreach).</p>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    if len(signals_df) == 0:
-        st.info("No signals loaded yet - try **Refresh data**.")
-        top_high = signals_df.iloc[:0]
-    else:
-        high_only = signals_df[signals_df["score"] >= TOP_CURATED_MIN_SCORE].copy()
-        top_high = rank_for_hero_sections(high_only).head(5)
-
-    if len(signals_df) > 0 and len(top_high) == 0:
-        st.info(
-            f"No signals at **score ≥ {TOP_CURATED_MIN_SCORE}** right now. Lower the sidebar minimum score for the full table, or check back after refresh."
-        )
-    elif len(top_high) > 0:
-        for i, (_, row) in enumerate(top_high.iterrows()):
-            header_line = format_signal_header_line(row)
-            hl = html.escape(header_line)
-            out_e = html.escape(str(row.get("outreach_angle", "")))
-            new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
-            ago = human_time_ago(row.get("detected_at"))
-            href = safe_href(str(row.get("source_url", "")))
-            with st.container(border=True):
-                c1, c2 = st.columns([3, 1])
-                with c1:
-                    st.markdown(
-                        f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(row.get("priority_level", ""))} | Score: {int(row.get("score", 0) or 0)} | {out_e}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"""<p class="ws-card-meta">Detected {html.escape(ago)}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                with c2:
-                    st.markdown(
-                        f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{int(row.get("score", 0) or 0)}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                st.caption(row.get("suggested_next_step", ""))
-                st.markdown(
-                    f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
-                    unsafe_allow_html=True,
-                )
-
-st.markdown("""<hr class="ws-rule"/>""", unsafe_allow_html=True)
-
-# -----------------------------------------------------------------------------
-# Metrics (based on the full loaded dataset - before search / date slicing)
+# Main layout: Home (top 5) vs Explore (table, details, metrics)
 # -----------------------------------------------------------------------------
 n_total = len(signals_df)
-with st.container(border=True, key="ws_card_metrics"):
-    st.markdown(
-        """<div class="ws-section-head" style="border-bottom:none;padding-bottom:0;margin-bottom:0.35rem;"><h2 class="ws-h2">Performance snapshot</h2></div>""",
-        unsafe_allow_html=True,
-    )
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.metric("Total signals", f"{n_total:,}" if n_total else "0")
-    with m2:
-        if n_total and signals_df["score"].notna().any():
-            hi = int(signals_df["score"].max())
-        else:
-            hi = None
-        st.metric("Highest score", hi if hi is not None else "-")
-    with m3:
-        if n_total:
-            modes = signals_df["event_type"].replace("", pd.NA).dropna().mode()
-            common = str(modes.iloc[0]) if len(modes) else "-"
-        else:
-            common = "-"
-        st.metric("Most common event type", common)
 
-# -----------------------------------------------------------------------------
-# Top signals this week (last 7 days, or top overall if none in window)
-# -----------------------------------------------------------------------------
-if n_total == 0:
-    top_week = signals_df.iloc[:0]
-    used_week_fallback = False
-else:
-    now = pd.Timestamp.now()
-    week_ago = now - pd.Timedelta(days=7)
-    dated = signals_df["event_date"].notna()
-    in_week = signals_df.loc[dated & (signals_df["event_date"] >= week_ago)]
-    if len(in_week) > 0:
-        in_week = in_week[in_week["score"] >= TOP_CURATED_MIN_SCORE]
-        top_week = rank_for_hero_sections(in_week).head(5)
-        used_week_fallback = False
-    else:
-        overall = signals_df[signals_df["score"] >= TOP_CURATED_MIN_SCORE].copy()
-        top_week = rank_for_hero_sections(overall).head(5)
-        used_week_fallback = True
+tab_home, tab_explore = st.tabs(["Home", "Explore & data"])
 
-with st.container(border=True, key="ws_card_week"):
-    st.markdown(
-        f"""
+with tab_home:
+    with st.container(border=True, key="ws_card_priority"):
+        st.markdown(
+            f"""
 <div class="ws-section-head">
-  <h2 class="ws-h2">Top signals this week</h2>
-  <p class="ws-section-sub">Score ≥ {TOP_CURATED_MIN_SCORE} from the last 7 days (falls back to top overall if none fall in that window).</p>
+  <h2 class="ws-h2">Top signals</h2>
+  <p class="ws-section-sub">Up to <strong>{HOME_TOP_SIGNALS}</strong> highlights: score ≥ {TOP_CURATED_MIN_SCORE}, ranked for outreach (uses sidebar filters).</p>
 </div>
 """,
-        unsafe_allow_html=True,
-    )
-    if used_week_fallback and n_total > 0:
-        st.caption("No dated signals in the last 7 days - showing the top 5 by score overall.")
+            unsafe_allow_html=True,
+        )
 
-    if len(top_week) == 0 and n_total > 0:
-        st.info("No rows to highlight.")
-    elif len(top_week) > 0:
-        for i, (_, row) in enumerate(top_week.iterrows()):
-            header_line = format_signal_header_line(row)
-            hl = html.escape(header_line)
-            out_e = html.escape(str(row.get("outreach_angle", "")))
-            new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
-            ago = human_time_ago(row.get("detected_at"))
-            href = safe_href(str(row.get("source_url", "")))
-            with st.container(border=True):
-                c1, c2 = st.columns([3, 1])
-                with c1:
-                    st.markdown(
-                        f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(row.get("priority_level", ""))} | Score: {int(row.get("score", 0) or 0)}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"""<p class="ws-card-line" style="font-size:0.8rem;">{out_e}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"""<p class="ws-card-meta">Detected {html.escape(ago)}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                with c2:
-                    st.markdown(
-                        f"""<p class="ws-score-pill" style="text-align:right;margin:0;">{int(row.get("score", 0) or 0)}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                st.write(row.get("why_it_matters", ""))
-                st.markdown(
-                    f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
-                    unsafe_allow_html=True,
-                )
+        if len(signals_df) == 0:
+            st.info("No signals loaded yet - try **Refresh data**.")
+            top_home = signals_df.iloc[:0]
+        elif len(filtered) == 0:
+            st.info("No rows match your filters - widen event types or lower the minimum score, or open **Explore & data**.")
+            top_home = filtered.iloc[:0]
+        else:
+            high_only = filtered[filtered["score"] >= TOP_CURATED_MIN_SCORE].copy()
+            top_home = rank_for_hero_sections(high_only).head(HOME_TOP_SIGNALS)
 
-st.markdown("""<hr class="ws-rule"/>""", unsafe_allow_html=True)
+        if len(signals_df) > 0 and len(filtered) > 0 and len(top_home) == 0:
+            st.info(
+                f"No signals at **score ≥ {TOP_CURATED_MIN_SCORE}** with current filters. Lower the sidebar minimum score or clear search."
+            )
+        elif len(top_home) > 0:
+            for i, (_, row) in enumerate(top_home.iterrows()):
+                header_line = format_signal_header_line(row)
+                hl = html.escape(header_line)
+                out_e = html.escape(str(row.get("outreach_angle", "")))
+                new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
+                ago = human_time_ago(row.get("detected_at"))
+                href = safe_href(str(row.get("source_url", "")))
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    with c1:
+                        st.markdown(
+                            f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(
+                            f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(row.get("priority_level", ""))} | Score: {int(row.get("score", 0) or 0)} | {out_e}</p>""",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(
+                            f"""<p class="ws-card-meta">Detected {html.escape(ago)}</p>""",
+                            unsafe_allow_html=True,
+                        )
+                    with c2:
+                        st.markdown(
+                            f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{int(row.get("score", 0) or 0)}</p>""",
+                            unsafe_allow_html=True,
+                        )
+                    st.caption(row.get("suggested_next_step", ""))
+                    st.markdown(
+                        f"""<p class="ws-link"><a href="{href}" target="_blank" rel="noopener noreferrer">Open source -&gt;</a></p>""",
+                        unsafe_allow_html=True,
+                    )
+    st.caption(f"Full feed, search, and row details are on the **Explore & data** tab.")
 
-# -----------------------------------------------------------------------------
-# Main table (formatted for readability)
-# -----------------------------------------------------------------------------
-table_columns = [
-    "person_name",
-    "additional_people",
-    "company_name",
-    "event_type",
-    "raw_title",
-    "role",
-    "event_date",
-    "score",
-    "wealth_score",
-    "estimated_wealth",
-    "aggregated_estimated_wealth",
-    "target_client",
-    "priority_level",
-    "outreach_angle",
-    "why_it_matters",
-    "source_url",
-    "quality_score",
-    "confidence_score",
-    "is_billionaire",
-    "net_worth",
-    "billionaire_company",
-    "priority",
-    "repeat_person",
-    "linked_wealth_signal",
-    "repeat_company",
-]
+with tab_explore:
+    # Metrics (full loaded dataset)
+    with st.container(border=True, key="ws_card_metrics"):
+        st.markdown(
+            """<div class="ws-section-head" style="border-bottom:none;padding-bottom:0;margin-bottom:0.35rem;"><h2 class="ws-h2">Performance snapshot</h2></div>""",
+            unsafe_allow_html=True,
+        )
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("Total signals", f"{n_total:,}" if n_total else "0")
+        with m2:
+            if n_total and signals_df["score"].notna().any():
+                hi = int(signals_df["score"].max())
+            else:
+                hi = None
+            st.metric("Highest score", hi if hi is not None else "-")
+        with m3:
+            if n_total:
+                modes = signals_df["event_type"].replace("", pd.NA).dropna().mode()
+                common = str(modes.iloc[0]) if len(modes) else "-"
+            else:
+                common = "-"
+            st.metric("Most common event type", common)
 
-ensure_columns_present(
-    filtered,
-    table_columns
-    + [
-        "detected_at",
+    st.markdown("""<hr class="ws-rule"/>""", unsafe_allow_html=True)
+    
+    # -----------------------------------------------------------------------------
+    # Main table (formatted for readability)
+    # -----------------------------------------------------------------------------
+    table_columns = [
+        "person_name",
+        "additional_people",
+        "company_name",
+        "event_type",
+        "raw_title",
+        "role",
+        "event_date",
+        "score",
         "wealth_score",
         "estimated_wealth",
         "aggregated_estimated_wealth",
         "target_client",
+        "priority_level",
+        "outreach_angle",
+        "why_it_matters",
+        "source_url",
+        "quality_score",
+        "confidence_score",
         "is_billionaire",
         "net_worth",
         "billionaire_company",
@@ -1040,213 +956,231 @@ ensure_columns_present(
         "repeat_person",
         "linked_wealth_signal",
         "repeat_company",
-    ],
-)
-display_df = filtered[table_columns].copy()
-if not display_df.empty and "additional_people" in display_df.columns:
-    display_df["additional_people"] = display_df["additional_people"].map(_format_additional_people)
-if not display_df.empty:
-    _det = filtered.get("detected_at", pd.Series([pd.NaT] * len(filtered)))
-    display_df.insert(0, "Label", _det.apply(lambda x: "NEW" if is_signal_new(x) else ""))
-    display_df["Detected"] = _det.apply(human_time_ago)
-if not display_df.empty and "event_date" in display_df.columns:
-    display_df["event_date"] = pd.to_datetime(display_df["event_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    display_df["event_date"] = display_df["event_date"].fillna("-")
-if not display_df.empty and "is_billionaire" in display_df.columns:
-    display_df["is_billionaire"] = display_df["is_billionaire"].fillna(False).astype(bool)
-if not display_df.empty and "target_client" in display_df.columns:
-    display_df["target_client"] = display_df["target_client"].map(_format_target_client_cell)
-if not display_df.empty and "wealth_score" in display_df.columns:
-    display_df["wealth_score"] = pd.to_numeric(display_df["wealth_score"], errors="coerce").fillna(0).astype(int)
-if not display_df.empty and "estimated_wealth" in display_df.columns:
-    display_df["estimated_wealth"] = pd.to_numeric(
-        display_df["estimated_wealth"], errors="coerce"
-    ).fillna(0.0)
-if not display_df.empty and "aggregated_estimated_wealth" in display_df.columns:
-    display_df["aggregated_estimated_wealth"] = pd.to_numeric(
-        display_df["aggregated_estimated_wealth"], errors="coerce"
-    ).fillna(0.0)
-if not display_df.empty and "repeat_person" in display_df.columns:
-    display_df["repeat_person"] = display_df["repeat_person"].fillna(False).astype(bool)
-if not display_df.empty and "linked_wealth_signal" in display_df.columns:
-    display_df["linked_wealth_signal"] = display_df["linked_wealth_signal"].fillna(False).astype(bool)
-if not display_df.empty and "repeat_company" in display_df.columns:
-    display_df["repeat_company"] = display_df["repeat_company"].fillna(False).astype(bool)
-
-st.markdown(
-    """
-<div class="ws-section-head">
-  <h2 class="ws-h2">All signals</h2>
-  <p class="ws-section-sub">Full feed with filters - <strong>NEW</strong> = detected in the last 48 hours.</p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-st.write(f"Showing **{len(filtered)}** signal(s) with current filters.")
-
-if filtered.empty:
-    st.info("No rows match your filters. Try clearing search, widening the date range, or lowering the score.")
-else:
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Label": st.column_config.TextColumn(" ", width="small"),
-            "person_name": st.column_config.TextColumn("Person", width="medium"),
-            "additional_people": st.column_config.TextColumn("Also named", width="medium"),
-            "company_name": st.column_config.TextColumn("Company", width="medium"),
-            "event_type": st.column_config.TextColumn("Event", width="small"),
-            "raw_title": st.column_config.TextColumn("Raw title (debug)", width="large"),
-            "role": st.column_config.TextColumn("Role", width="small"),
-            "event_date": st.column_config.TextColumn("Date", width="small"),
-            "score": st.column_config.NumberColumn("Score", format="%d", width="small"),
-            "wealth_score": st.column_config.NumberColumn("Wealth", format="%d", width="small"),
-            "estimated_wealth": st.column_config.NumberColumn("Est. $", format="$%d", width="small"),
-            "aggregated_estimated_wealth": st.column_config.NumberColumn("Agg. $", format="$%d", width="small"),
-            "target_client": st.column_config.TextColumn("Target", width="small"),
-            "priority_level": st.column_config.TextColumn("Priority", width="small"),
-            "outreach_angle": st.column_config.TextColumn("Outreach angle", width="large"),
-            "why_it_matters": st.column_config.TextColumn("Why it matters", width="large"),
-            "Detected": st.column_config.TextColumn("Detected", width="small"),
-            "source_url": st.column_config.LinkColumn("Source", width="medium"),
-            "quality_score": st.column_config.NumberColumn("Quality", format="%d", width="small"),
-            "confidence_score": st.column_config.NumberColumn("Conf.", format="%d", width="small"),
-            "is_billionaire": st.column_config.CheckboxColumn("Billionaire", width="small"),
-            "net_worth": st.column_config.TextColumn("Net worth (list)", width="small"),
-            "billionaire_company": st.column_config.TextColumn("List source co.", width="medium"),
-            "priority": st.column_config.TextColumn("Value tag", width="medium"),
-            "repeat_person": st.column_config.CheckboxColumn("Repeat", width="small"),
-            "linked_wealth_signal": st.column_config.CheckboxColumn("Linked $", width="small"),
-            "repeat_company": st.column_config.CheckboxColumn("Co. repeat", width="small"),
-        },
+    ]
+    
+    ensure_columns_present(
+        filtered,
+        table_columns
+        + [
+            "detected_at",
+            "wealth_score",
+            "estimated_wealth",
+            "aggregated_estimated_wealth",
+            "target_client",
+            "is_billionaire",
+            "net_worth",
+            "billionaire_company",
+            "priority",
+            "repeat_person",
+            "linked_wealth_signal",
+            "repeat_company",
+        ],
     )
-
-# -----------------------------------------------------------------------------
-# Details: compact scrollable panel (expandable rows)
-# -----------------------------------------------------------------------------
-with st.container(border=True, key="ws_details_explorer"):
+    display_df = filtered[table_columns].copy()
+    if not display_df.empty and "additional_people" in display_df.columns:
+        display_df["additional_people"] = display_df["additional_people"].map(_format_additional_people)
+    if not display_df.empty:
+        _det = filtered.get("detected_at", pd.Series([pd.NaT] * len(filtered)))
+        display_df.insert(0, "Label", _det.apply(lambda x: "NEW" if is_signal_new(x) else ""))
+        display_df["Detected"] = _det.apply(human_time_ago)
+    if not display_df.empty and "event_date" in display_df.columns:
+        display_df["event_date"] = pd.to_datetime(display_df["event_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        display_df["event_date"] = display_df["event_date"].fillna("-")
+    if not display_df.empty and "is_billionaire" in display_df.columns:
+        display_df["is_billionaire"] = display_df["is_billionaire"].fillna(False).astype(bool)
+    if not display_df.empty and "target_client" in display_df.columns:
+        display_df["target_client"] = display_df["target_client"].map(_format_target_client_cell)
+    if not display_df.empty and "wealth_score" in display_df.columns:
+        display_df["wealth_score"] = pd.to_numeric(display_df["wealth_score"], errors="coerce").fillna(0).astype(int)
+    if not display_df.empty and "estimated_wealth" in display_df.columns:
+        display_df["estimated_wealth"] = pd.to_numeric(
+            display_df["estimated_wealth"], errors="coerce"
+        ).fillna(0.0)
+    if not display_df.empty and "aggregated_estimated_wealth" in display_df.columns:
+        display_df["aggregated_estimated_wealth"] = pd.to_numeric(
+            display_df["aggregated_estimated_wealth"], errors="coerce"
+        ).fillna(0.0)
+    if not display_df.empty and "repeat_person" in display_df.columns:
+        display_df["repeat_person"] = display_df["repeat_person"].fillna(False).astype(bool)
+    if not display_df.empty and "linked_wealth_signal" in display_df.columns:
+        display_df["linked_wealth_signal"] = display_df["linked_wealth_signal"].fillna(False).astype(bool)
+    if not display_df.empty and "repeat_company" in display_df.columns:
+        display_df["repeat_company"] = display_df["repeat_company"].fillna(False).astype(bool)
+    
     st.markdown(
         """
-<div class="ws-section-head">
-  <h2 class="ws-h2">Details Explorer</h2>
-  <p class="ws-section-sub">Search and filter, then expand a row. The list scrolls inside the panel below.</p>
-</div>
-""",
+    <div class="ws-section-head">
+      <h2 class="ws-h2">All signals</h2>
+      <p class="ws-section-sub">Full feed with filters - <strong>NEW</strong> = detected in the last 48 hours.</p>
+    </div>
+    """,
         unsafe_allow_html=True,
     )
-    st.markdown(
-        """<p style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#0f172a;margin:0 0 0.4rem 0;">Search &amp; filter</p>""",
-        unsafe_allow_html=True,
-    )
-    search_col, prio_col = st.columns([5, 4], gap="medium")
-    with search_col:
-        details_search = st.text_input(
-            "Search details",
-            placeholder="Person, company, raw title, or role...",
-            key="details_search",
-            label_visibility="visible",
-            help="Filters rows in this panel only (partial match, case-insensitive).",
+    st.write(f"Showing **{len(filtered)}** signal(s) with current filters.")
+    
+    if filtered.empty:
+        st.info("No rows match your filters. Try clearing search, widening the date range, or lowering the score.")
+    else:
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Label": st.column_config.TextColumn(" ", width="small"),
+                "person_name": st.column_config.TextColumn("Person", width="medium"),
+                "additional_people": st.column_config.TextColumn("Also named", width="medium"),
+                "company_name": st.column_config.TextColumn("Company", width="medium"),
+                "event_type": st.column_config.TextColumn("Event", width="small"),
+                "raw_title": st.column_config.TextColumn("Raw title (debug)", width="large"),
+                "role": st.column_config.TextColumn("Role", width="small"),
+                "event_date": st.column_config.TextColumn("Date", width="small"),
+                "score": st.column_config.NumberColumn("Score", format="%d", width="small"),
+                "wealth_score": st.column_config.NumberColumn("Wealth", format="%d", width="small"),
+                "estimated_wealth": st.column_config.NumberColumn("Est. $", format="$%d", width="small"),
+                "aggregated_estimated_wealth": st.column_config.NumberColumn("Agg. $", format="$%d", width="small"),
+                "target_client": st.column_config.TextColumn("Target", width="small"),
+                "priority_level": st.column_config.TextColumn("Priority", width="small"),
+                "outreach_angle": st.column_config.TextColumn("Outreach angle", width="large"),
+                "why_it_matters": st.column_config.TextColumn("Why it matters", width="large"),
+                "Detected": st.column_config.TextColumn("Detected", width="small"),
+                "source_url": st.column_config.LinkColumn("Source", width="medium"),
+                "quality_score": st.column_config.NumberColumn("Quality", format="%d", width="small"),
+                "confidence_score": st.column_config.NumberColumn("Conf.", format="%d", width="small"),
+                "is_billionaire": st.column_config.CheckboxColumn("Billionaire", width="small"),
+                "net_worth": st.column_config.TextColumn("Net worth (list)", width="small"),
+                "billionaire_company": st.column_config.TextColumn("List source co.", width="medium"),
+                "priority": st.column_config.TextColumn("Value tag", width="medium"),
+                "repeat_person": st.column_config.CheckboxColumn("Repeat", width="small"),
+                "linked_wealth_signal": st.column_config.CheckboxColumn("Linked $", width="small"),
+                "repeat_company": st.column_config.CheckboxColumn("Co. repeat", width="small"),
+            },
         )
-    with prio_col:
-        def _details_priority_label(v: str) -> str:
-            return {
-                "all": "All",
-                "high": "High priority",
-                "medium": "Medium priority",
-                "low": "Low priority",
-            }[v]
-
-        priority_filter = st.radio(
-            "Priority",
-            ["all", "high", "medium", "low"],
-            horizontal=True,
-            format_func=_details_priority_label,
-            key="details_priority_filter",
-            help="Show all priorities or narrow to one level.",
+    
+    # -----------------------------------------------------------------------------
+    # Details: compact scrollable panel (expandable rows)
+    # -----------------------------------------------------------------------------
+    with st.container(border=True, key="ws_details_explorer"):
+        st.markdown(
+            """
+    <div class="ws-section-head">
+      <h2 class="ws-h2">Details Explorer</h2>
+      <p class="ws-section-sub">Search and filter, then expand a row. The list scrolls inside the panel below.</p>
+    </div>
+    """,
+            unsafe_allow_html=True,
         )
-
-    details_filtered = filtered.copy()
-    if details_search.strip():
-        search_lower = details_search.strip().lower()
-        pn = details_filtered.get("person_name", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
-        cn = details_filtered.get("company_name", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
-        rt = details_filtered.get("raw_title", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
-        rl = details_filtered.get("role", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
-        ap = details_filtered.get("additional_people", pd.Series([""] * len(details_filtered))).map(
-            lambda x: _format_additional_people(x).lower()
+        st.markdown(
+            """<p style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#0f172a;margin:0 0 0.4rem 0;">Search &amp; filter</p>""",
+            unsafe_allow_html=True,
         )
-        mask = (
-            pn.str.contains(search_lower, na=False, regex=False)
-            | cn.str.contains(search_lower, na=False, regex=False)
-            | rt.str.contains(search_lower, na=False, regex=False)
-            | rl.str.contains(search_lower, na=False, regex=False)
-            | ap.str.contains(search_lower, na=False, regex=False)
-        )
-        details_filtered = details_filtered[mask]
-
-    if priority_filter != "all":
-        _pl = {"high": "High", "medium": "Medium", "low": "Low"}[priority_filter]
-        details_filtered = details_filtered[details_filtered["priority_level"] == _pl]
-
-    with st.container(height=580, border=False, key="ws_details_scroll"):
-        if details_filtered.empty:
-            st.caption("No rows match these filters. Clear the search or set Priority to All.")
-        else:
-            for _, row in details_filtered.iterrows():
-                also = _format_additional_people(row.get("additional_people"))
-                new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
-                title_plain = format_signal_header_line(row)
-                ed = row.get("event_date")
-                if pd.isna(ed):
-                    date_str = "-"
-                else:
-                    ts = pd.Timestamp(ed)
-                    date_str = ts.strftime("%Y-%m-%d")
-                det = human_time_ago(row.get("detected_at"))
-                with st.expander(title_plain):
-                    st.markdown(
-                        f"""<p style="margin:0 0 0.75rem 0;">{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
-                        unsafe_allow_html=True,
-                    )
-                    if row.get("is_billionaire"):
-                        st.caption(
-                            f"💰 Billionaire list: net worth {row.get('net_worth') or '—'} "
-                            f"({row.get('billionaire_company') or 'source —'})"
+        search_col, prio_col = st.columns([5, 4], gap="medium")
+        with search_col:
+            details_search = st.text_input(
+                "Search details",
+                placeholder="Person, company, raw title, or role...",
+                key="details_search",
+                label_visibility="visible",
+                help="Filters rows in this panel only (partial match, case-insensitive).",
+            )
+        with prio_col:
+            def _details_priority_label(v: str) -> str:
+                return {
+                    "all": "All",
+                    "high": "High priority",
+                    "medium": "Medium priority",
+                    "low": "Low priority",
+                }[v]
+    
+            priority_filter = st.radio(
+                "Priority",
+                ["all", "high", "medium", "low"],
+                horizontal=True,
+                format_func=_details_priority_label,
+                key="details_priority_filter",
+                help="Show all priorities or narrow to one level.",
+            )
+    
+        details_filtered = filtered.copy()
+        if details_search.strip():
+            search_lower = details_search.strip().lower()
+            pn = details_filtered.get("person_name", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
+            cn = details_filtered.get("company_name", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
+            rt = details_filtered.get("raw_title", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
+            rl = details_filtered.get("role", pd.Series([""] * len(details_filtered))).fillna("").str.lower()
+            ap = details_filtered.get("additional_people", pd.Series([""] * len(details_filtered))).map(
+                lambda x: _format_additional_people(x).lower()
+            )
+            mask = (
+                pn.str.contains(search_lower, na=False, regex=False)
+                | cn.str.contains(search_lower, na=False, regex=False)
+                | rt.str.contains(search_lower, na=False, regex=False)
+                | rl.str.contains(search_lower, na=False, regex=False)
+                | ap.str.contains(search_lower, na=False, regex=False)
+            )
+            details_filtered = details_filtered[mask]
+    
+        if priority_filter != "all":
+            _pl = {"high": "High", "medium": "Medium", "low": "Low"}[priority_filter]
+            details_filtered = details_filtered[details_filtered["priority_level"] == _pl]
+    
+        with st.container(height=580, border=False, key="ws_details_scroll"):
+            if details_filtered.empty:
+                st.caption("No rows match these filters. Clear the search or set Priority to All.")
+            else:
+                for _, row in details_filtered.iterrows():
+                    also = _format_additional_people(row.get("additional_people"))
+                    new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
+                    title_plain = format_signal_header_line(row)
+                    ed = row.get("event_date")
+                    if pd.isna(ed):
+                        date_str = "-"
+                    else:
+                        ts = pd.Timestamp(ed)
+                        date_str = ts.strftime("%Y-%m-%d")
+                    det = human_time_ago(row.get("detected_at"))
+                    with st.expander(title_plain):
+                        st.markdown(
+                            f"""<p style="margin:0 0 0.75rem 0;">{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
+                            unsafe_allow_html=True,
                         )
-                    if also:
-                        st.caption(f"Also named in story: {also}")
-                    st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
-                    st.markdown(f"**Priority:** {row.get('priority_level', '')}")
-                    st.markdown(f"**Detected:** {det}")
-                    st.markdown(f"**Outreach suggestion:** {row.get('outreach_angle', '')}")
-                    st.markdown(f"**Suggested next step:** {row.get('suggested_next_step', '')}")
-                    st.markdown("---")
-                    st.markdown(f"**Role:** {row.get('role') or '-'}")
-                    st.markdown(f"**Date:** {date_str}")
-                    st.markdown(f"**Score:** {int(row.get('score', 0) or 0)}")
-                    _tc = row.get("target_client")
-                    _tc_label = (
-                        "yes"
-                        if _tc is True or str(_tc).lower() == "true"
-                        else ("mid" if _tc == "mid" or str(_tc).lower() == "mid" else "no")
-                    )
-                    _ew = float(row.get("estimated_wealth") or 0)
-                    _agg = float(row.get("aggregated_estimated_wealth") or 0)
-                    st.markdown(
-                        f"**Wealth score:** {int(row.get('wealth_score', 0) or 0)} | "
-                        f"**Est. wealth (this row):** ${_ew:,.0f} | "
-                        f"**Agg. est. (person):** ${_agg:,.0f} | "
-                        f"**Target client:** {_tc_label}"
-                    )
-                    st.caption(
-                        f"Cross-article: repeat person = {bool(row.get('repeat_person'))} | "
-                        f"linked wealth signal = {bool(row.get('linked_wealth_signal'))} | "
-                        f"repeat company = {bool(row.get('repeat_company'))}"
-                    )
-                    st.markdown("**Why it matters**")
-                    st.write(row.get("why_it_matters", ""))
-                    st.markdown("**Full explanation**")
-                    st.write(row.get("full_explanation") or "-")
-                    st.markdown("**Source**")
-                    st.markdown(f"[Open public source]({row.get('source_url', '')})")
+                        if row.get("is_billionaire"):
+                            st.caption(
+                                f"💰 Billionaire list: net worth {row.get('net_worth') or '—'} "
+                                f"({row.get('billionaire_company') or 'source —'})"
+                            )
+                        if also:
+                            st.caption(f"Also named in story: {also}")
+                        st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
+                        st.markdown(f"**Priority:** {row.get('priority_level', '')}")
+                        st.markdown(f"**Detected:** {det}")
+                        st.markdown(f"**Outreach suggestion:** {row.get('outreach_angle', '')}")
+                        st.markdown(f"**Suggested next step:** {row.get('suggested_next_step', '')}")
+                        st.markdown("---")
+                        st.markdown(f"**Role:** {row.get('role') or '-'}")
+                        st.markdown(f"**Date:** {date_str}")
+                        st.markdown(f"**Score:** {int(row.get('score', 0) or 0)}")
+                        _tc = row.get("target_client")
+                        _tc_label = (
+                            "yes"
+                            if _tc is True or str(_tc).lower() == "true"
+                            else ("mid" if _tc == "mid" or str(_tc).lower() == "mid" else "no")
+                        )
+                        _ew = float(row.get("estimated_wealth") or 0)
+                        _agg = float(row.get("aggregated_estimated_wealth") or 0)
+                        st.markdown(
+                            f"**Wealth score:** {int(row.get('wealth_score', 0) or 0)} | "
+                            f"**Est. wealth (this row):** ${_ew:,.0f} | "
+                            f"**Agg. est. (person):** ${_agg:,.0f} | "
+                            f"**Target client:** {_tc_label}"
+                        )
+                        st.caption(
+                            f"Cross-article: repeat person = {bool(row.get('repeat_person'))} | "
+                            f"linked wealth signal = {bool(row.get('linked_wealth_signal'))} | "
+                            f"repeat company = {bool(row.get('repeat_company'))}"
+                        )
+                        st.markdown("**Why it matters**")
+                        st.write(row.get("why_it_matters", ""))
+                        st.markdown("**Full explanation**")
+                        st.write(row.get("full_explanation") or "-")
+                        st.markdown("**Source**")
+                        st.markdown(f"[Open public source]({row.get('source_url', '')})")
