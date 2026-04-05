@@ -1043,11 +1043,23 @@ def render_home_signal_card(row: pd.Series) -> None:
                 row.get("top5_score") if _has_top5 else row.get("priority_score", row.get("score")),
                 0,
             )
+            _oc = row.get("overall_confidence")
+            try:
+                _oc_pct = int(round(float(_oc) * 100)) if _oc is not None and not pd.isna(_oc) else None
+            except (TypeError, ValueError):
+                _oc_pct = None
+            _vs = str(row.get("verification_status") or "").strip()
+            _right_title = "Overall confidence" if _oc_pct is not None else "Priority score"
+            _right_val = f"{_oc_pct}%" if _oc_pct is not None else str(_ps)
             st.markdown(
-                f"""<p style="text-align:right;margin:0;font-size:0.85rem;color:#9CA3AF;">Priority</p>"""
-                f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{_ps}</p>""",
+                f"""<p style="text-align:right;margin:0;font-size:0.85rem;color:#9CA3AF;">{_right_title}</p>"""
+                f"""<p style="text-align:right;margin:0;font-size:1.05rem;font-weight:700;">{_right_val}</p>""",
                 unsafe_allow_html=True,
             )
+            if _oc_pct is not None:
+                st.caption(f"Priority score: **{_ps}**" + (f" · {_vs}" if _vs else ""))
+            elif _vs:
+                st.caption(_vs)
         _cap = str(row.get("ai_outreach", "") or "").strip() or str(row.get("suggested_next_step", "") or "")
         st.caption(_cap)
         st.markdown(
@@ -1468,6 +1480,15 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
                 st.json(json.loads(str(_ea)))
             except (json.JSONDecodeError, TypeError):
                 st.code(str(_ea)[:2000], language=None)
+        _pd = explore_view.iloc[0].get("pipeline_debug_json", "")
+        if str(_pd or "").strip():
+            st.divider()
+            st.markdown("**Verified pipeline trace (first visible row)**")
+            st.caption("Relevance → extract → enrich → wealth/actionability → reject → score.")
+            try:
+                st.json(json.loads(str(_pd)))
+            except (json.JSONDecodeError, TypeError):
+                st.code(str(_pd)[:12000], language=None)
     else:
         st.caption("No rows match filters — widen event types or lower the minimum score.")
 

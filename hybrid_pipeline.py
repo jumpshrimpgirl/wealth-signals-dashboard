@@ -711,6 +711,41 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     # Broad recall: when OpenAI is configured, always attempt structured extraction (no hard-drop on weak signal).
     gate = bool(os.environ.get("OPENAI_API_KEY", "").strip()) or int(sig.get("signal_score") or 0) >= 25 or article_economic
 
+    use_client_ai_early = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+    # Verified wealth pipeline (accuracy-first): relevance → extract → enrich → score → reject.
+    if use_client_ai_early:
+        from verified_wealth_pipeline import run_verified_wealth_pipeline, verified_pipeline_enabled
+
+        if verified_pipeline_enabled():
+            qres = run_verified_wealth_pipeline(
+                summary=summary,
+                source_title=source_title,
+                source_url=source_url,
+                published_at=published_at,
+                row=row,
+                na=na,
+                sig=sig,
+            )
+            if qres is not None:
+                rows_q, _rq = qres
+                return rows_q
+
+        from ai_quality_pipeline import quality_pipeline_enabled, run_quality_pipeline_v1
+
+        if quality_pipeline_enabled():
+            qres = run_quality_pipeline_v1(
+                summary=summary,
+                source_title=source_title,
+                source_url=source_url,
+                published_at=published_at,
+                row=row,
+                na=na,
+                sig=sig,
+            )
+            if qres is not None:
+                rows_q, _rq = qres
+                return rows_q
+
     ai_payload: dict[str, Any] | None = None
     if gate:
         ai_payload = extract_prospect_candidates(na)

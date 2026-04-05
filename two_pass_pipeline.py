@@ -493,6 +493,15 @@ def build_home_top_view(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     if sub.empty:
         return sub
 
+    # Verified pipeline v2: strict Top-5 qualification when present; legacy rows have NaN → allowed.
+    if "qualifies_verified_top5" in sub.columns:
+        qv = sub["qualifies_verified_top5"]
+        sub = sub[qv.isna() | qv.astype(bool)].copy()
+    elif "eligible_for_home_top" in sub.columns:
+        sub = sub[sub["eligible_for_home_top"].fillna(True).astype(bool)].copy()
+    if sub.empty:
+        return sub
+
     kh = sub["keep_for_home"].fillna(False)
     if kh.dtype == object:
         kh = kh.astype(str).str.lower().isin(("true", "1", "yes"))

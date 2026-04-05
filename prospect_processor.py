@@ -18,6 +18,7 @@ from hybrid_pipeline import (
     to_clean_dataframe,
 )
 from two_pass_pipeline import apply_pass2_home_rerank
+from prospect_dedupe import dedupe_prospect_dataframe
 from wealth_display import validate_display_wealth
 
 
@@ -54,6 +55,7 @@ def process_and_rank_prospects(raw_rows: pd.DataFrame) -> pd.DataFrame:
 
     processed = process_articles(raw_rows)
     df = pd.DataFrame(processed)
+    df = dedupe_prospect_dataframe(df)
     df = _apply_wealth_display_gate(df)
     return apply_pass2_home_rerank(df, pool_size=30)
 
