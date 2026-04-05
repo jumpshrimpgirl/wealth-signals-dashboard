@@ -1193,7 +1193,10 @@ selected_liquidity = st.sidebar.multiselect(
 )
 
 _ct_series = signals_df.get("client_type", pd.Series(dtype=object)).fillna("").astype(str).str.strip()
-_ct_opts = sorted({_fa_nonempty(x, fallback="Unknown") for x in _ct_series.tolist() if x is not None})
+_ct_opts = sorted({_fa_nonempty(x, fallback="Unknown") for x in _ct_series.tolist()})
+if "Unknown" not in _ct_opts:
+    _ct_opts.append("Unknown")
+    _ct_opts = sorted(_ct_opts)
 if not _ct_opts:
     _ct_opts = ["Unknown", "Executive", "Founder / Entrepreneur"]
 selected_client_types = st.sidebar.multiselect(
@@ -1567,58 +1570,64 @@ with tab_explore:
                         )
                         if row.get("is_billionaire"):
                             st.caption(
-                                f"💰 Billionaire list: net worth {row.get('net_worth') or '—'} "
-                                f"({row.get('billionaire_company') or 'source —'})"
+                                f"💰 Billionaire list match: net worth {_fa_nonempty(row.get('net_worth'), fallback='Data pending')} "
+                                f"({_fa_nonempty(row.get('billionaire_company'), fallback='Not identified')})"
                             )
                         if also:
                             st.caption(f"Also named in story: {also}")
-                        _so = str(row.get("source_outlet") or "").strip()
-                        if _so:
-                            st.caption(f"Source outlet: {_so}")
-                        st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")
-                        st.markdown(f"**Priority:** {row.get('priority_level', '')}")
-                        _wsl = str(row.get("wealth_signal_label") or "").strip()
-                        _liq = str(row.get("liquidity_event") or "").strip()
-                        _clt = str(row.get("client_type") or "").strip()
-                        _sow = str(row.get("source_of_wealth") or "").strip()
-                        st.markdown(
-                            f"**Wealth signal (rules):** {_wsl or '—'} | **Liquidity event:** {_liq or '—'} | "
-                            f"**Client type:** {_clt or '—'}"
+
+                        st.markdown("##### Prospect")
+                        st.markdown(f"**Name:** {_fa_nonempty(row.get('person_name'), fallback='Not identified')}")
+                        st.markdown(f"**Role / title:** {_fa_nonempty(row.get('role'), fallback='Not identified')}")
+                        st.markdown(f"**Company:** {_fa_nonempty(row.get('company_name'), fallback='Not identified')}")
+
+                        st.markdown("##### Wealth & liquidity")
+                        st.markdown(f"**Wealth signal:** {wealth_signal_for_display(row)}")
+                        st.caption("Strong / Moderate / Weak / None — how clearly the story implies money, liquidity, or ultra-wealth.")
+                        st.markdown(f"**Liquidity event:** {liquidity_for_display(row)}")
+                        st.caption("Yes / Potential / No — cash, stock sale, IPO, round, compensation event, etc.")
+
+                        _ew_disp = str(row.get("est_wealth_display") or "").strip() or format_wealth(
+                            row.get("estimated_wealth")
                         )
-                        if _sow:
-                            st.caption(f"Source of wealth (inferred): {_sow}")
-                        st.markdown(f"**Detected:** {det}")
+                        _agg_disp = format_wealth(row.get("aggregated_estimated_wealth"))
+                        st.markdown(f"**Estimated wealth (this row):** {_ew_disp}")
+                        st.markdown(f"**Net worth / aggregated (same person in feed):** {_agg_disp}")
+                        st.caption("“Data pending” when no reliable estimate; aggregate sums per person in this feed.")
+
+                        st.markdown(f"**Source of wealth:** {source_of_wealth_for_display(row)}")
+                        st.caption("Channel for the wealth (e.g. M&A, IPO, equity round, compensation, inheritance).")
+
+                        st.markdown(f"**Client type:** {client_type_for_display(row)}")
+                        st.caption("Advisor archetype: founder, executive, investor, athlete, heir, or unknown.")
+
+                        st.markdown(f"**Why it matters:** {_fa_nonempty(row.get('why_it_matters'), fallback='Data pending')}")
+
+                        st.markdown("##### AI summary")
                         _ai_s = str(row.get("ai_summary", "") or "").strip()
                         _ai_w = str(row.get("ai_why_it_matters", "") or "").strip()
                         _ai_o = str(row.get("ai_outreach", "") or "").strip()
-                        _ai_ws = str(row.get("ai_wealth_signal") or "").strip()
-                        _ai_lq = str(row.get("ai_liquidity_label") or "").strip()
-                        _ai_who = str(row.get("ai_client_who") or "").strip()
                         _ai_wm = str(row.get("ai_why_money") or "").strip()
-                        if _ai_s or _ai_w or _ai_o or _ai_ws or _ai_lq or _ai_who or _ai_wm:
-                            st.markdown("**AI (advisor context)**")
-                            if _ai_ws or _ai_lq or _ai_who or _ai_wm:
-                                st.markdown(
-                                    f"**Wealth signal:** {_ai_ws or '—'} | **Liquidity:** {_ai_lq or '—'} | "
-                                    f"**Who is the client:** {_ai_who or '—'}"
-                                )
-                                if _ai_wm:
-                                    st.markdown(f"**Why it matters (money):** {_ai_wm}")
-                            if _ai_s:
-                                st.markdown(f"**Summary:** {_ai_s}")
-                            if _ai_w:
-                                st.markdown(f"**Why it matters:** {_ai_w}")
-                            if _ai_o:
-                                st.markdown(f"**Outreach angle:** {_ai_o}")
-                            st.markdown("---")
-                        st.markdown(
-                            f"**Outreach (template):** {row.get('outreach_angle', '')}"
-                        )
-                        st.markdown(f"**Suggested next step:** {row.get('suggested_next_step', '')}")
-                        st.markdown("---")
-                        st.markdown(f"**Role:** {row.get('role') or '-'}")
-                        st.markdown(f"**Date:** {date_str}")
-                        st.markdown(f"**Score:** {int(row.get('score', 0) or 0)}")
+                        _who = str(row.get("ai_client_who") or "").strip() or prospect_who_for_display(row)
+                        st.markdown(f"**Who is the prospect:** {_who}")
+                        if _ai_wm:
+                            st.markdown(f"**Why it matters (money / prospect value):** {_ai_wm}")
+                        if _ai_s:
+                            st.markdown(f"**Summary:** {_ai_s}")
+                        if _ai_w:
+                            st.markdown(f"**Advisor context:** {_ai_w}")
+                        if _ai_o:
+                            st.markdown(f"**Outreach angle:** {_ai_o}")
+
+                        st.markdown("##### Article & source")
+                        st.markdown(f"**Headline:** {row.get('raw_title') or '—'}")
+                        _url = str(row.get("source_url") or "").strip()
+                        if _url:
+                            st.markdown(f"**Article:** [Open public source]({safe_href(_url)})")
+                        _so = str(row.get("source_outlet") or "").strip()
+                        if _so:
+                            st.caption(f"Publisher / domain: {_so}")
+
                         _tc = row.get("target_client")
                         _tc_label = (
                             "yes"
@@ -1627,24 +1636,21 @@ with tab_explore:
                             or str(_tc).strip().upper() == "YES"
                             else ("mid" if _tc == "mid" or str(_tc).lower() == "mid" else "no")
                         )
-                        _ew_disp = str(row.get("est_wealth_display") or "").strip() or format_wealth(
-                            row.get("estimated_wealth")
-                        )
-                        _agg_disp = format_wealth(row.get("aggregated_estimated_wealth"))
+                        st.markdown("##### Secondary (pipeline)")
+                        st.markdown(f"**Story category:** {row.get('event_type') or '—'}")
                         st.markdown(
-                            f"**Wealth score:** {int(row.get('wealth_score', 0) or 0)} | "
-                            f"**Est. wealth (this row):** {_ew_disp} | "
-                            f"**Agg. est. (person):** {_agg_disp} | "
-                            f"**Target client:** {_tc_label}"
+                            f"**Pipeline score:** {int(row.get('score', 0) or 0)} · "
+                            f"**Priority:** {row.get('priority_level') or '—'} · "
+                            f"**Wealth score (rules):** {int(row.get('wealth_score', 0) or 0)} · "
+                            f"**Target client flag:** {_tc_label}"
                         )
+                        st.caption(f"Detected {det} · Event date: {date_str}")
+                        st.markdown(f"**Outreach template:** {row.get('outreach_angle', '')}")
+                        st.markdown(f"**Suggested next step:** {row.get('suggested_next_step', '')}")
                         st.caption(
-                            f"Cross-article: repeat person = {bool(row.get('repeat_person'))} | "
-                            f"linked wealth signal = {bool(row.get('linked_wealth_signal'))} | "
-                            f"repeat company = {bool(row.get('repeat_company'))}"
+                            f"Repeat person = {bool(row.get('repeat_person'))} · "
+                            f"Linked wealth signal = {bool(row.get('linked_wealth_signal'))} · "
+                            f"Repeat company = {bool(row.get('repeat_company'))}"
                         )
-                        st.markdown("**Why it matters (baseline)**")
-                        st.write(row.get("why_it_matters", ""))
-                        st.markdown("**Full explanation**")
-                        st.write(row.get("full_explanation") or "-")
-                        st.markdown("**Source**")
-                        st.markdown(f"[Open public source]({row.get('source_url', '')})")
+                        st.markdown("**Full text (snippet)**")
+                        st.write(_fa_nonempty(row.get("full_explanation"), fallback="Data pending"))
