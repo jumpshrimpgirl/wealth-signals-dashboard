@@ -33,8 +33,8 @@ def compute_signal_score(
 
     Bonuses: +20 person, +15 real company, +10 role.
 
-    Penalties: -30 when type is Other; -20 when person_name is empty; -15 when
-    company is missing or Unknown.
+    Penalties (volume-friendly; rows are kept, not dropped): -30 when type is Other;
+    -25 when person_name is empty; -15 when company is missing or Unknown.
     """
     et = (event_type or "").strip()
     base = EVENT_BASE_SCORES.get(et, 50)
@@ -44,14 +44,14 @@ def compute_signal_score(
     if pn:
         score += 20
     cn = str(company_name or "").strip()
-    if cn and cn != "Unknown":
+    if cn and cn.lower() != "unknown":
         score += 15
     if str(role or "").strip():
         score += 10
     if et == "Other":
         score -= 30
     if not pn:
-        score -= 20
+        score -= 25
     if not cn or cn.lower() == "unknown":
         score -= 15
 

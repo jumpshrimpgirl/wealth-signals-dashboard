@@ -19,6 +19,9 @@ from person_validation import is_valid_person
 # How long a signal counts as "NEW" in the feed (hours)
 NEW_WINDOW_HOURS = 48
 
+# Curated hero blocks: score floor (full table uses sidebar minimum score only)
+TOP_CURATED_MIN_SCORE = 40
+
 # Hero sections: core event types rank above "Other" (do not use categorical sort — it reversed order).
 EVENT_TYPE_RANK = {
     "Founder Exit": 5,
@@ -46,6 +49,30 @@ def billionaire_badge_html(row) -> str:
             'style="background:#fef9c3;border:1px solid #eab308;">💰</span> '
         )
     return ""
+
+
+def target_client_badge_html(row) -> str:
+    """Badge for primary target (high wealth / deal) or mid-tier ($1M–$5M est.)."""
+    v = row.get("target_client")
+    if v is True or str(v).lower() == "true":
+        return (
+            '<span class="ws-badge" title="Target client: strong wealth or $5M+ estimated personal stake" '
+            'style="background:#dcfce7;border:1px solid #22c55e;">★</span> '
+        )
+    if v == "mid" or str(v).lower() == "mid":
+        return (
+            '<span class="ws-badge" title="Mid target: ~$1M–$5M estimated wealth from deal size" '
+            'style="background:#ffedd5;border:1px solid #f97316;">◆</span> '
+        )
+    return ""
+
+
+def _format_target_client_cell(v) -> str:
+    if v is True or str(v).lower() == "true":
+        return "yes"
+    if v == "mid" or str(v).lower() == "mid":
+        return "mid"
+    return "no"
 
 
 def format_signal_header_line(row) -> str:
@@ -661,18 +688,12 @@ selected_types = st.sidebar.multiselect(
     help="Include every type by default. Narrow to debug specific buckets.",
 )
 
-show_other = st.sidebar.checkbox(
-    "Show low-confidence / Other signals",
-    value=True,
-    help='When off, hides rows with event type "Other" (broad finance/career match).',
-)
-
 min_score = st.sidebar.slider(
     "Minimum score",
     min_value=0,
     max_value=100,
-    value=0,
-    help="Shown rows require score ≥ max(slider, 50).",
+    value=TOP_CURATED_MIN_SCORE,
+    help=f"Applies to the All signals table and Details (no hidden floor). Hero sections use score ≥ {TOP_CURATED_MIN_SCORE}.",
 )
 
 sort_by = st.sidebar.radio(
@@ -743,10 +764,7 @@ if selected_types:
 else:
     filtered = filtered.iloc[0:0]
 
-if not show_other:
-    filtered = filtered[filtered["event_type"] != "Other"]
-
-filtered = filtered[filtered["score"] >= max(min_score, 50)]
+filtered = filtered[filtered["score"] >= min_score]
 
 if search_q:
     pn = filtered.get("person_name", pd.Series([""] * len(filtered))).fillna("").str.lower()
@@ -799,17 +817,17 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
         _vc = filtered.get("event_type", pd.Series(dtype=object)).value_counts().rename_axis("event_type").reset_index(name="count")
         st.dataframe(_vc, hide_index=True, use_container_width=True)
     else:
-        st.caption("No rows match filters - widen event types, raise score ceiling, or enable Other.")
+        st.caption("No rows match filters — widen event types or lower the minimum score.")
 
 # -----------------------------------------------------------------------------
 # Top high priority opportunities (action layer - who to act on first)
 # -----------------------------------------------------------------------------
 with st.container(border=True, key="ws_card_priority"):
     st.markdown(
-        """
+        f"""
 <div class="ws-section-head">
   <h2 class="ws-h2">Top high priority opportunities</h2>
-  <p class="ws-section-sub">Highest-scoring <strong>High</strong> priority signals - good candidates to engage this week.</p>
+  <p class="ws-section-sub">Curated list: score ≥ {TOP_CURATED_MIN_SCORE} (ranked for outreach).</p>
 </div>
 """,
         unsafe_allow_html=True,
@@ -819,16 +837,13 @@ with st.container(border=True, key="ws_card_priority"):
         st.info("No signals loaded yet - try **Refresh data**.")
         top_high = signals_df.iloc[:0]
     else:
-        high_only = signals_df[signals_df["priority_level"] == "High"]
-        # Strong extractions only; "Other" needs higher bar; drop empty person + Unknown company
-        high_only = high_only[high_only["quality_score"] >= 5]
-        high_only = high_only[~((high_only["event_type"] == "Other") & (high_only["quality_score"] < 6))]
-        high_only = high_only[~((high_only["person_name"] == "") & (high_only["company_name"] == "Unknown"))]
-        high_only = high_only[high_only["person_name"].apply(is_valid_person)]
+        high_only = signals_df[signals_df["score"] >= TOP_CURATED_MIN_SCORE].copy()
         top_high = rank_for_hero_sections(high_only).head(5)
 
     if len(signals_df) > 0 and len(top_high) == 0:
-        st.info("No **High** priority signals right now (score >= 85). Lower the minimum score filter below or check back after refresh.")
+        st.info(
+            f"No signals at **score ≥ {TOP_CURATED_MIN_SCORE}** right now. Lower the sidebar minimum score for the full table, or check back after refresh."
+        )
     elif len(top_high) > 0:
         for i, (_, row) in enumerate(top_high.iterrows()):
             header_line = format_signal_header_line(row)
@@ -841,11 +856,11 @@ with st.container(border=True, key="ws_card_priority"):
                 c1, c2 = st.columns([3, 1])
                 with c1:
                     st.markdown(
-                        f"""<p class="ws-card-line"><strong>{hl}</strong>{billionaire_badge_html(row)}{new_html}</p>""",
+                        f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
-                        f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html("High")} | Score: {int(row.get("score", 0) or 0)} | {out_e}</p>""",
+                        f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(row.get("priority_level", ""))} | Score: {int(row.get("score", 0) or 0)} | {out_e}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -903,27 +918,20 @@ else:
     dated = signals_df["event_date"].notna()
     in_week = signals_df.loc[dated & (signals_df["event_date"] >= week_ago)]
     if len(in_week) > 0:
-        in_week = in_week[in_week["quality_score"] >= 5]
-        in_week = in_week[~((in_week["event_type"] == "Other") & (in_week["quality_score"] < 6))]
-        in_week = in_week[~((in_week["person_name"] == "") & (in_week["company_name"] == "Unknown"))]
-        in_week = in_week[in_week["person_name"].apply(is_valid_person)]
+        in_week = in_week[in_week["score"] >= TOP_CURATED_MIN_SCORE]
         top_week = rank_for_hero_sections(in_week).head(5)
         used_week_fallback = False
     else:
-        overall = signals_df.copy()
-        overall = overall[overall["quality_score"] >= 5]
-        overall = overall[~((overall["event_type"] == "Other") & (overall["quality_score"] < 6))]
-        overall = overall[~((overall["person_name"] == "") & (overall["company_name"] == "Unknown"))]
-        overall = overall[overall["person_name"].apply(is_valid_person)]
+        overall = signals_df[signals_df["score"] >= TOP_CURATED_MIN_SCORE].copy()
         top_week = rank_for_hero_sections(overall).head(5)
         used_week_fallback = True
 
 with st.container(border=True, key="ws_card_week"):
     st.markdown(
-        """
+        f"""
 <div class="ws-section-head">
   <h2 class="ws-h2">Top signals this week</h2>
-  <p class="ws-section-sub">Highest-scoring items from the last 7 days (falls back to top overall if none fall in that window).</p>
+  <p class="ws-section-sub">Score ≥ {TOP_CURATED_MIN_SCORE} from the last 7 days (falls back to top overall if none fall in that window).</p>
 </div>
 """,
         unsafe_allow_html=True,
@@ -945,7 +953,7 @@ with st.container(border=True, key="ws_card_week"):
                 c1, c2 = st.columns([3, 1])
                 with c1:
                     st.markdown(
-                        f"""<p class="ws-card-line"><strong>{hl}</strong>{billionaire_badge_html(row)}{new_html}</p>""",
+                        f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -985,6 +993,9 @@ table_columns = [
     "role",
     "event_date",
     "score",
+    "wealth_score",
+    "estimated_wealth",
+    "target_client",
     "priority_level",
     "outreach_angle",
     "why_it_matters",
@@ -994,11 +1005,22 @@ table_columns = [
     "is_billionaire",
     "net_worth",
     "billionaire_company",
+    "priority",
 ]
 
 ensure_columns_present(
     filtered,
-    table_columns + ["detected_at", "is_billionaire", "net_worth", "billionaire_company"],
+    table_columns
+    + [
+        "detected_at",
+        "wealth_score",
+        "estimated_wealth",
+        "target_client",
+        "is_billionaire",
+        "net_worth",
+        "billionaire_company",
+        "priority",
+    ],
 )
 display_df = filtered[table_columns].copy()
 if not display_df.empty and "additional_people" in display_df.columns:
@@ -1012,6 +1034,14 @@ if not display_df.empty and "event_date" in display_df.columns:
     display_df["event_date"] = display_df["event_date"].fillna("-")
 if not display_df.empty and "is_billionaire" in display_df.columns:
     display_df["is_billionaire"] = display_df["is_billionaire"].fillna(False).astype(bool)
+if not display_df.empty and "target_client" in display_df.columns:
+    display_df["target_client"] = display_df["target_client"].map(_format_target_client_cell)
+if not display_df.empty and "wealth_score" in display_df.columns:
+    display_df["wealth_score"] = pd.to_numeric(display_df["wealth_score"], errors="coerce").fillna(0).astype(int)
+if not display_df.empty and "estimated_wealth" in display_df.columns:
+    display_df["estimated_wealth"] = pd.to_numeric(
+        display_df["estimated_wealth"], errors="coerce"
+    ).fillna(0.0)
 
 st.markdown(
     """
@@ -1041,6 +1071,9 @@ else:
             "role": st.column_config.TextColumn("Role", width="small"),
             "event_date": st.column_config.TextColumn("Date", width="small"),
             "score": st.column_config.NumberColumn("Score", format="%d", width="small"),
+            "wealth_score": st.column_config.NumberColumn("Wealth", format="%d", width="small"),
+            "estimated_wealth": st.column_config.NumberColumn("Est. $", format="$%d", width="small"),
+            "target_client": st.column_config.TextColumn("Target", width="small"),
             "priority_level": st.column_config.TextColumn("Priority", width="small"),
             "outreach_angle": st.column_config.TextColumn("Outreach angle", width="large"),
             "why_it_matters": st.column_config.TextColumn("Why it matters", width="large"),
@@ -1051,6 +1084,7 @@ else:
             "is_billionaire": st.column_config.CheckboxColumn("Billionaire", width="small"),
             "net_worth": st.column_config.TextColumn("Net worth (list)", width="small"),
             "billionaire_company": st.column_config.TextColumn("List source co.", width="medium"),
+            "priority": st.column_config.TextColumn("Value tag", width="medium"),
         },
     )
 
@@ -1138,7 +1172,7 @@ with st.container(border=True, key="ws_details_explorer"):
                 det = human_time_ago(row.get("detected_at"))
                 with st.expander(title_plain):
                     st.markdown(
-                        f"""<p style="margin:0 0 0.75rem 0;">{billionaire_badge_html(row)}{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
+                        f"""<p style="margin:0 0 0.75rem 0;">{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
                         unsafe_allow_html=True,
                     )
                     if row.get("is_billionaire"):
@@ -1157,6 +1191,18 @@ with st.container(border=True, key="ws_details_explorer"):
                     st.markdown(f"**Role:** {row.get('role') or '-'}")
                     st.markdown(f"**Date:** {date_str}")
                     st.markdown(f"**Score:** {int(row.get('score', 0) or 0)}")
+                    _tc = row.get("target_client")
+                    _tc_label = (
+                        "yes"
+                        if _tc is True or str(_tc).lower() == "true"
+                        else ("mid" if _tc == "mid" or str(_tc).lower() == "mid" else "no")
+                    )
+                    _ew = float(row.get("estimated_wealth") or 0)
+                    st.markdown(
+                        f"**Wealth score:** {int(row.get('wealth_score', 0) or 0)} | "
+                        f"**Est. wealth (deal):** ${_ew:,.0f} | "
+                        f"**Target client:** {_tc_label}"
+                    )
                     st.markdown("**Why it matters**")
                     st.write(row.get("why_it_matters", ""))
                     st.markdown("**Full explanation**")

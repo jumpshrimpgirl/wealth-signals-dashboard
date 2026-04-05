@@ -12,7 +12,6 @@ import os
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
-from difflib import get_close_matches
 from typing import Any
 from urllib.parse import urlparse
 
@@ -55,9 +54,13 @@ REQUIRED_COLUMNS = [
     "quality_score",
     "confidence_score",
     "is_relevant",
+    "wealth_score",
+    "estimated_wealth",
+    "target_client",
     "is_billionaire",
     "net_worth",
     "billionaire_company",
+    "priority",
 ]
 
 # -----------------------------------------------------------------------------
@@ -162,15 +165,33 @@ def build_billionaire_lookup(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
     return lookup
 
 
-def match_name(name: str, lookup: dict[str, dict[str, Any]]) -> str | None:
-    """Fuzzy match ``name`` to a key in ``lookup`` (exact lower, else difflib)."""
-    if not lookup or not (name or "").strip():
+def normalize_name(name: str | None) -> str:
+    return str(name or "").lower().strip()
+
+
+def match_billionaire(
+    person_name: str | None,
+    lookup: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """
+    Resolve ``person_name`` to billionaire row data: exact normalized match, else last-name match.
+
+    Returns the value dict ``{"net_worth", "company", "industry"}`` or None.
+    """
+    if not lookup:
         return None
-    key = name.strip().lower()
-    if key in lookup:
-        return key
-    matches = get_close_matches(key, list(lookup.keys()), n=1, cutoff=0.85)
-    return matches[0] if matches else None
+    name = normalize_name(person_name)
+    if not name:
+        return None
+    if name in lookup:
+        return lookup[name]
+    parts = name.split()
+    if len(parts) >= 2:
+        last = parts[-1]
+        for k in sorted(lookup.keys()):
+            if last in k:
+                return lookup[k]
+    return None
 
 
 def get_billionaire_lookup() -> dict[str, dict[str, Any]]:
@@ -186,7 +207,7 @@ def get_billionaire_lookup() -> dict[str, dict[str, Any]]:
 
 
 def _enrich_signals_with_billionaire_list(out: pd.DataFrame) -> None:
-    """Match ``person_name`` to the billionaire table; boost score and set wealth fields."""
+    """Match ``person_name`` to the billionaire table; set wealth fields and a small score bonus."""
     if out.empty:
         return
     lookup = get_billionaire_lookup()
@@ -194,21 +215,46 @@ def _enrich_signals_with_billionaire_list(out: pd.DataFrame) -> None:
         out.at[idx, "is_billionaire"] = False
         out.at[idx, "net_worth"] = ""
         out.at[idx, "billionaire_company"] = ""
-        pn = str(out.at[idx, "person_name"] or "").strip().lower()
-        if not pn or not lookup:
+        if not lookup:
             continue
-        m = match_name(pn, lookup)
-        if not m:
-            continue
-        data = lookup[m]
-        out.at[idx, "is_billionaire"] = True
-        nw = data.get("net_worth")
-        out.at[idx, "net_worth"] = "" if nw is None else str(nw)
-        bc = data.get("company")
-        out.at[idx, "billionaire_company"] = "" if bc is None else str(bc)
-        sc = int(out.at[idx, "score"])
-        out.at[idx, "score"] = min(sc + 40, 100)
+        match = match_billionaire(str(out.at[idx, "person_name"] or ""), lookup)
+        if match:
+            out.at[idx, "is_billionaire"] = True
+            nw = match.get("net_worth")
+            out.at[idx, "net_worth"] = "" if nw is None else str(nw)
+            bc = match.get("company")
+            out.at[idx, "billionaire_company"] = "" if bc is None else str(bc)
+            sc = int(out.at[idx, "score"])
+            out.at[idx, "score"] = min(sc + 20, 100)
+            print("Matched billionaire:", out.at[idx, "person_name"])
     out["is_billionaire"] = out["is_billionaire"].fillna(False).astype(bool)
+
+
+def _target_client_is_high_value(tc: object) -> bool:
+    """True for primary target clients (not ``\"mid\"``)."""
+    if isinstance(tc, str):
+        return False
+    try:
+        return bool(tc)
+    except Exception:
+        return False
+
+
+def _apply_value_priority_tags(out: pd.DataFrame) -> None:
+    """Derive ``priority`` from ``target_client`` (wealth signals) and billionaire list match."""
+    if out.empty or "priority" not in out.columns:
+        return
+    for idx in out.index:
+        tc = out.at[idx, "target_client"]
+        ib = bool(out.at[idx, "is_billionaire"])
+        parts: list[str] = []
+        if _target_client_is_high_value(tc):
+            parts.append("TARGET CLIENT")
+        elif isinstance(tc, str) and tc.lower() == "mid":
+            parts.append("MID TARGET")
+        if ib:
+            parts.append("BILLIONAIRE LIST")
+        out.at[idx, "priority"] = " + ".join(parts) if parts else ""
 
 
 # -----------------------------------------------------------------------------
@@ -229,6 +275,15 @@ RSS_FEEDS = [
     # Extra
     "https://feeds.marketwatch.com/marketwatch/topstories/",
     "https://feeds.bbci.co.uk/news/business/rss.xml",
+    # CNN (high volume)
+    "http://rss.cnn.com/rss/edition_business.rss",
+    "http://rss.cnn.com/rss/cnn_tech.rss",
+    "http://rss.cnn.com/rss/cnn_topstories.rss",
+    # MSNBC / NBC
+    "http://feeds.nbcnews.com/feeds/topstories",
+    "http://feeds.nbcnews.com/feeds/business",
+    # General high-volume
+    "http://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
 ]
 
 # Browser-like User-Agent: some feeds block generic Python clients.
@@ -1767,18 +1822,170 @@ def _funding_deal_score_bonus(funding_amount_str: str) -> int:
     return 0
 
 
-# --- Hard relevance: drop geopolitical / legal / cyber noise (before classification in RSS) ---
-_HARD_NOISE_SUBSTRINGS = (
-    "cyberattack",
-    "data breach",
-    "war",
-    "missile",
-    "military",
-    "government",
-    "trial",
-    "lawsuit",
-    "investigation",
+# Deal size → individual wealth (rough ownership × headline $ amount)
+_DEAL_VALUE_RE = re.compile(
+    r"\$([0-9]+(?:\.[0-9]+)?)\s*(M|B|million|billion)\b",
+    re.I,
 )
+
+
+def _usd_from_deal_match(m: re.Match[str]) -> float:
+    n = float(m.group(1))
+    u = (m.group(2) or "").lower()
+    if u in ("m", "million"):
+        return n * 1_000_000
+    if u in ("b", "billion"):
+        return n * 1_000_000_000
+    return 0.0
+
+
+def _max_deal_value_in_text(text: str) -> float:
+    best = 0.0
+    for m in _DEAL_VALUE_RE.finditer(text or ""):
+        v = _usd_from_deal_match(m)
+        if v > best:
+            best = v
+    return best
+
+
+def extract_deal_value_usd(raw_title: str, full_explanation: str) -> float:
+    """
+    Largest ``$…M/B/million/billion`` from title + body.
+
+    When the word ``valuation`` appears, prefer the largest amount in a window around it
+    (company valuation as proxy for deal scale).
+    """
+    blob = f"{raw_title} {full_explanation}"
+    blob_l = blob.lower()
+    if "valuation" in blob_l:
+        best = 0.0
+        start = 0
+        while True:
+            i = blob_l.find("valuation", start)
+            if i == -1:
+                break
+            win = blob[max(0, i - 120) : min(len(blob), i + 120)]
+            v = _max_deal_value_in_text(win)
+            if v > best:
+                best = v
+            start = i + 1
+        if best > 0:
+            return best
+    return _max_deal_value_in_text(blob)
+
+
+def _ownership_fraction_from_role(role: str) -> float:
+    r = (role or "").lower()
+    if re.search(r"co[- ]?founder", r):
+        return 0.10
+    if re.search(r"\bfounder\b", r):
+        return 0.15
+    if re.search(r"\bceo\b", r):
+        return 0.05
+    return 0.02
+
+
+def estimate_wealth_from_deal(
+    raw_title: str,
+    full_explanation: str,
+    role: str,
+) -> tuple[float, float]:
+    """``(estimated_wealth_usd, deal_value_usd)`` from deal size × implied ownership."""
+    deal = extract_deal_value_usd(raw_title, full_explanation)
+    own = _ownership_fraction_from_role(role)
+    return (deal * own, deal)
+
+
+def merge_target_client_row(wealth_score: int, estimated_wealth: float) -> bool | str:
+    """
+    Combine rule-based ``wealth_score`` with deal-based ``estimated_wealth``.
+
+    Deal path: ``>= $5M`` personal estimate → primary target; ``$1M–$5M`` → ``\"mid\"``;
+    ``wealth_score >= 50`` still marks a primary target.
+    """
+    w = int(wealth_score) >= 50
+    ew = float(estimated_wealth)
+    if ew >= 5_000_000:
+        return True
+    if w:
+        return True
+    if ew >= 1_000_000:
+        return "mid"
+    return False
+
+
+def compute_wealth_score(
+    raw_title: str,
+    full_explanation: str,
+    funding_amount: str,
+    event_type: str,
+    role: str,
+) -> int:
+    """
+    Internal wealth-signal score (not the same as ``score`` / outreach rank).
+
+    Used to flag FA-relevant leads (~$10M+ potential) via ``target_client``.
+    """
+    ws = 0
+    blob = f"{raw_title} {full_explanation}".lower()
+    r = (role or "").lower()
+    et = (event_type or "").strip()
+
+    fa = (funding_amount or "").strip()
+    v_col = _parse_single_funding_token_to_usd(fa)
+    ext_tok = _extract_largest_funding_amount_string(f"{raw_title} {full_explanation}")
+    v_ext = _parse_single_funding_token_to_usd(ext_tok) if ext_tok else None
+    vals = [x for x in (v_col, v_ext) if x is not None and x > 0]
+    v = max(vals) if vals else 0.0
+
+    if v >= 100_000_000:
+        ws += 60
+    elif v >= 10_000_000:
+        ws += 40
+    elif v >= 1_000_000:
+        ws += 20
+
+    if et == "Founder Exit":
+        ws += 50
+    elif re.search(r"\b(acquisition|acquired|acquires|buyout|merger)\b", blob):
+        ws += 50
+
+    if re.search(r"\bceo\b", r):
+        ws += 30
+    elif re.search(r"\b(cfo|coo)\b", r):
+        ws += 20
+
+    if re.search(r"co[- ]?founder|\bfounder\b", r):
+        ws += 40
+
+    has_phrase = (
+        "sold for" in blob
+        or re.search(r"\bexit\b", blob) is not None
+        or "acquired for" in blob
+        or "valuation" in blob
+        or "stake worth" in blob
+        or re.search(r"\bequity\b", blob) is not None
+    )
+    if has_phrase:
+        ws += 40
+
+    return ws
+
+
+# --- Banned topics: only these substring hits drop a row; everything else is scored and ranked ---
+_BANNED_TOPIC_SUBSTRINGS = (
+    "cyberattack",
+    "breach",
+    "war",
+    "lawsuit",
+    "trial",
+)
+
+
+def _contains_banned_topics(text: str) -> bool:
+    """True if text should not be ingested (hard drop only)."""
+    t = (text or "").lower()
+    return any(s in t for s in _BANNED_TOPIC_SUBSTRINGS)
 
 _SOFT_ACTION_RE = re.compile(
     r"\b(?:"
@@ -1991,33 +2198,20 @@ def structured_pattern_confidence_and_type(
     return et, conf
 
 
-def _text_matches_hard_noise_blocklist(text: str) -> bool:
-    """True if article text should be rejected (non-actionable / noisy topics)."""
-    t = (text or "").lower()
-    if any(s in t for s in _HARD_NOISE_SUBSTRINGS):
-        return True
-    return bool(re.search(r"\bhacks?\b|\bhacking\b", t))
-
-
 def _is_relevant_signal(
     text_blob: str,
-    company_name: str,
+    company_name: str = "",
     person_name: str = "",
     legacy_event_type: str | None = None,
 ) -> bool:
     """
-    Actionable career/wealth signal filter.
+    Row is kept unless the headline/body text matches a banned topic.
 
-    - Reject hard-noise topics (cyber, war, legal, etc.).
-    - Drop when structured pattern confidence < 20 (see ``structured_pattern_confidence_and_type``).
-    - Require at least one sentence with an event keyword AND (person OR company) in that sentence.
+    Thin metadata (missing person, Other, Unknown company) is handled via ``score`` penalties,
+    not row deletion.
     """
-    if _text_matches_hard_noise_blocklist(text_blob):
-        return False
-    _, conf = structured_pattern_confidence_and_type(text_blob, legacy_event_type=legacy_event_type)
-    if conf < 20:
-        return False
-    return _opportunity_sentence_gate(text_blob, person_name, company_name)
+    del company_name, person_name, legacy_event_type
+    return not _contains_banned_topics(text_blob)
 
 
 def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -2038,11 +2232,16 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     - Enriches ``industry``, ``stage``, ``company_description``, ``company_location`` via
       ``enrich_company_data`` (mock + article fallback)
     - Sets ``funding_amount`` / ``funding_stage`` from article text via ``extract_funding_fields_from_text``
+    - Computes ``wealth_score``, ``estimated_wealth`` (deal size × ownership), merges ``target_client``
+      (rule-based + deal tiers), boosts ``score`` for high wealth / $5M+ deal estimates, then
+      billionaire-list bonus (+20) and ``priority`` tags
     - Fills outreach_angle, priority_level, suggested_next_step (action layer)
     - Recomputes quality_score (0-8) and confidence_score (0-100) from final fields
     - Dedupes across sources by person+company+event (or by raw_title when person is missing),
       keeping the highest score
     - Drops duplicate source_url rows, keeping the highest confidence / score first
+    - Drops rows whose text matches banned topics only (see ``_BANNED_TOPIC_SUBSTRINGS``); thin
+      metadata is scored, not deleted
     """
     if df is None or df.empty:
         out = pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -2154,14 +2353,58 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         )
         out["score"] = out["score"].clip(0, 100).astype(int)
 
+        out["wealth_score"] = out.apply(
+            lambda row: compute_wealth_score(
+                str(row.get("raw_title", "")),
+                str(row.get("full_explanation", "")),
+                str(row.get("funding_amount", "")),
+                str(row.get("event_type", "")),
+                str(row.get("role", "")),
+            ),
+            axis=1,
+        ).astype(int)
+
+        _deal_tuples = out.apply(
+            lambda row: estimate_wealth_from_deal(
+                str(row.get("raw_title", "")),
+                str(row.get("full_explanation", "")),
+                str(row.get("role", "")),
+            ),
+            axis=1,
+        )
+        out["estimated_wealth"] = _deal_tuples.map(lambda t: float(t[0])).astype(float)
+        out["target_client"] = out.apply(
+            lambda row: merge_target_client_row(
+                int(row.get("wealth_score", 0) or 0),
+                float(row.get("estimated_wealth", 0) or 0),
+            ),
+            axis=1,
+        )
+        _w_high = out["wealth_score"] >= 50
+        _deal_high = out["estimated_wealth"] >= 5_000_000
+        out["score"] = (
+            out["score"]
+            + _w_high.astype(int) * 30
+            + _deal_high.astype(int) * 40
+        ).clip(0, 100).astype(int)
+
         _enrich_signals_with_billionaire_list(out)
+        _apply_value_priority_tags(out)
+    else:
+        out["wealth_score"] = 0
+        out["estimated_wealth"] = 0.0
+        out["target_client"] = False
 
     # --- Action layer: who to prioritize and what to say (derived from score + event_type) ---
     out["outreach_angle"] = out.apply(generate_outreach_angle, axis=1)
     out["priority_level"] = out["score"].apply(priority_level_from_score)
+    if not out.empty and "target_client" in out.columns and "is_billionaire" in out.columns:
+        _tc_hi = out["target_client"].map(_target_client_is_high_value).fillna(False).astype(bool)
+        _hi = _tc_hi | out["is_billionaire"].astype(bool)
+        out.loc[_hi, "priority_level"] = "High"
     out["suggested_next_step"] = out["priority_level"].apply(suggested_next_step_from_priority)
 
-    for col in ("outreach_angle", "priority_level", "suggested_next_step"):
+    for col in ("outreach_angle", "priority_level", "suggested_next_step", "priority"):
         out[col] = out[col].fillna("").astype(str).str.strip()
 
     # --- Extraction quality + confidence (single source of truth for hero sections) ---
@@ -2787,12 +3030,10 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         extraction_text = _extraction_text(article_paragraphs, title)
 
         blob_for_filter = f"{title} {summary} {article_paragraphs}".strip()
-        if _text_matches_hard_noise_blocklist(blob_for_filter):
+        if _contains_banned_topics(blob_for_filter):
             continue
 
-        legacy_et = _classify_event_type(extraction_text)
-        if not legacy_et:
-            continue
+        legacy_et = _classify_event_type(extraction_text) or "Other"
 
         # 1) Fast regex / heuristics on article body (or title if fetch failed)
         person, extra_people = _guess_all_person_names(extraction_text)
@@ -2807,14 +3048,6 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         scan_text = f"{title} {summary} {extraction_text}".strip()
         structured_et, _ = structured_pattern_confidence_and_type(scan_text, legacy_event_type=legacy_et)
         event_type = structured_et if structured_et is not None else event_type_merged
-
-        if not _is_relevant_signal(
-            blob_for_filter,
-            company,
-            person,
-            legacy_event_type=legacy_et,
-        ):
-            continue
 
         why = why_it_matters_for_event_type(event_type)
 
