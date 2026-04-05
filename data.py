@@ -1,7 +1,7 @@
 """
 Data layer: sample signals (fallback) and live RSS-based signals.
 
-Uses public RSS feeds only — no LinkedIn or private sources.
+Uses public RSS feeds only - no LinkedIn or private sources.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ RSS_FEEDS = [
     "https://feeds.arstechnica.com/arstechnica/business",
     "https://rss.cnn.com/rss/money_rss.xml",
     "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
-    # Executive / leadership / funding (Google News search RSS — public HTML)
+    # Executive / leadership / funding (Google News search RSS - public HTML)
     "https://news.google.com/rss/search?q=startup+funding+OR+CEO+appointment&hl=en-US&gl=US&ceid=US:en",
     "https://news.google.com/rss/search?q=board+of+directors+OR+executive+hire&hl=en-US&gl=US&ceid=US:en",
 ]
@@ -70,13 +70,13 @@ def outreach_angle_for_event_type(event_type: str) -> str:
     """
     et = (event_type or "").strip()
     angles = {
-        "Founder Exit": "Congrats on exit — discuss liquidity and tax strategy",
-        "Funding": "Congrats on raise — planning for future liquidity",
-        "Promotion": "New role → comp and tax optimization",
-        "Board Appointment": "New board role → expanding financial complexity",
-        "Other": "Broad finance or career headline — lead with context and curiosity",
+        "Founder Exit": "Congrats on exit - discuss liquidity and tax strategy",
+        "Funding": "Congrats on raise - planning for future liquidity",
+        "Promotion": "New role -> comp and tax optimization",
+        "Board Appointment": "New board role -> expanding financial complexity",
+        "Other": "Broad finance or career headline - lead with context and curiosity",
     }
-    return angles.get(et, "Acknowledge the news — offer relevant planning context.")
+    return angles.get(et, "Acknowledge the news - offer relevant planning context.")
 
 
 def generate_outreach_angle(row) -> str:
@@ -453,7 +453,7 @@ def _parse_entry_date(entry: Any) -> str:
 
 def _guess_person_name(title: str) -> str:
     """
-    Very light extraction — many headlines won't match; that's OK (empty string).
+    Very light extraction - many headlines won't match; that's OK (empty string).
     Looks for patterns like "Jane Doe joins ..." or "... names Jane Doe CEO".
     Conservative: require exactly two capitalized words for names.
     """
@@ -495,7 +495,7 @@ def _guess_company_name(title: str) -> str:
         if idx != -1:
             rest = t[idx + len(needle) :].strip()
             # Stop at common delimiters
-            rest = re.split(r" for |,|\.|;|\||–|—", rest, maxsplit=1)[0].strip()
+            rest = re.split(r" for |,|\.|;|\||–|-", rest, maxsplit=1)[0].strip()
             if rest and len(rest) < 120:
                 return rest
 
@@ -568,7 +568,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
     Turn RSS entries into row dicts.
 
     Keeps items that classify to a core type or 'Other'. Missing person_name / role
-    does not drop a row — those fields may stay empty.
+    does not drop a row - those fields may stay empty.
     """
     rows: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -627,7 +627,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
 
 def _raw_sample_signals() -> list[dict]:
     """
-    Hardcoded demo signals — used when RSS is unavailable or errors out.
+    Hardcoded demo signals - used when RSS is unavailable or errors out.
     Each dict matches the columns expected by the Streamlit app.
     """
     return [
@@ -635,7 +635,7 @@ def _raw_sample_signals() -> list[dict]:
             "person_name": "Alex Rivera",
             "company_name": "Northbeam Analytics",
             "event_type": "Founder Exit",
-            "raw_title": "Northbeam Analytics acquired in nine-figure strategic exit — Alex Rivera, Co-founder & CEO",
+            "raw_title": "Northbeam Analytics acquired in nine-figure strategic exit - Alex Rivera, Co-founder & CEO",
             "role": "Co-founder & CEO",
             "event_date": "2026-03-12",
             "why_it_matters": "Company acquisition often triggers liquidity for founders and early equity holders.",
@@ -774,7 +774,7 @@ def fetch_signals() -> pd.DataFrame:
 
     - If every feed fails or returns no entries: return load_sample_signals().
     - If feeds return items but nothing classifies: empty dataframe with ingest_debug
-      (so you can see raw count vs parsed count — not hidden behind sample data).
+      (so you can see raw count vs parsed count - not hidden behind sample data).
     - On success: rows from RSS with attrs['ingest_debug'] for pipeline transparency.
     """
     column_order = REQUIRED_COLUMNS
@@ -789,7 +789,7 @@ def fetch_signals() -> pd.DataFrame:
             continue
 
     if not all_entries:
-        # Every feed failed or returned no entries — use sample data
+        # Every feed failed or returned no entries - use sample data
         return load_sample_signals()
 
     raw_rows = _rss_items_to_signals(all_entries)

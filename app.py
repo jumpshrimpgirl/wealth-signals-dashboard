@@ -1,5 +1,5 @@
 """
-Wealth Signals Dashboard — Streamlit UI.
+Wealth Signals Dashboard - Streamlit UI.
 
 Run: streamlit run app.py
 """
@@ -276,7 +276,7 @@ def human_time_ago(ts) -> str:
     Turn a timestamp into a short, human phrase (e.g. '2 hours ago', '1 day ago').
     """
     if ts is None or pd.isna(ts):
-        return "—"
+        return "-"
     t = pd.Timestamp(ts)
     if t.tzinfo is None:
         t = t.tz_localize("UTC")
@@ -310,7 +310,7 @@ def is_signal_new(ts, hours: int = NEW_WINDOW_HOURS) -> bool:
 def format_detected_utc(ts) -> str:
     """Clock time in UTC for the 'Last updated' line."""
     if ts is None or pd.isna(ts):
-        return "—"
+        return "-"
     t = pd.Timestamp(ts)
     if t.tzinfo is None:
         t = t.tz_localize("UTC")
@@ -374,7 +374,7 @@ with header_left:
     )
     st.markdown(
         '<p class="ws-hero-sub">Public career & finance signals from RSS (sample data if live fetch fails). '
-        "Demo only — not investment advice.</p>",
+        "Demo only - not investment advice.</p>",
         unsafe_allow_html=True,
     )
     _df = st.session_state.signals_df
@@ -420,7 +420,7 @@ min_score = st.sidebar.slider(
     min_value=0,
     max_value=100,
     value=0,
-    help="Lower this if the table looks empty — ‘Other’ scores 55 by default.",
+    help="Lower this if the table looks empty - 'Other' scores 55 by default.",
 )
 
 sort_by = st.sidebar.radio(
@@ -506,9 +506,9 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
     st.caption("If raw ≫ parsed, classification is strict or headlines are off-topic.")
     c1, c2 = st.columns(2)
     with c1:
-        st.metric("Raw RSS items", _ingest.get("raw_rss_entries", "—"))
+        st.metric("Raw RSS items", _ingest.get("raw_rss_entries", "-"))
     with c2:
-        st.metric("Parsed signals", _ingest.get("parsed_signal_rows", "—"))
+        st.metric("Parsed signals", _ingest.get("parsed_signal_rows", "-"))
     st.metric("Rows after dedupe", _ingest.get("rows_after_finalize", len(signals_df)))
     st.caption(f"Source: `{_ingest.get('data_source', 'unknown')}`")
     st.divider()
@@ -522,23 +522,23 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
         _vc = filtered["event_type"].value_counts().rename_axis("event_type").reset_index(name="count")
         st.dataframe(_vc, hide_index=True, use_container_width=True)
     else:
-        st.caption("No rows match filters — widen event types, raise score ceiling, or enable Other.")
+        st.caption("No rows match filters - widen event types, raise score ceiling, or enable Other.")
 
 # -----------------------------------------------------------------------------
-# Top high priority opportunities (action layer — who to act on first)
+# Top high priority opportunities (action layer - who to act on first)
 # -----------------------------------------------------------------------------
 st.markdown(
     """
 <div class="ws-section-head">
   <h2 class="ws-h2">Top high priority opportunities</h2>
-  <p class="ws-section-sub">Highest-scoring <strong>High</strong> priority signals — good candidates to engage this week.</p>
+  <p class="ws-section-sub">Highest-scoring <strong>High</strong> priority signals - good candidates to engage this week.</p>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
 if len(signals_df) == 0:
-    st.info("No signals loaded yet — try **Refresh data**.")
+    st.info("No signals loaded yet - try **Refresh data**.")
     top_high = signals_df.iloc[:0]
 else:
     high_only = signals_df[signals_df["priority_level"] == "High"]
@@ -554,7 +554,7 @@ if len(signals_df) > 0 and len(top_high) == 0:
     st.info("No **High** priority signals right now (score ≥ 85). Lower the minimum score filter below or check back after refresh.")
 elif len(top_high) > 0:
     for i, (_, row) in enumerate(top_high.iterrows()):
-        person = row["person_name"] or "—"
+        person = row["person_name"] or "-"
         company = row["company_name"] or "Unknown"
         pe, ce = html.escape(str(person)), html.escape(str(company))
         out_e = html.escape(str(row["outreach_angle"]))
@@ -587,7 +587,7 @@ elif len(top_high) > 0:
 st.markdown('<hr class="ws-rule"/>', unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# Metrics (based on the full loaded dataset — before search / date slicing)
+# Metrics (based on the full loaded dataset - before search / date slicing)
 # -----------------------------------------------------------------------------
 m1, m2, m3 = st.columns(3)
 n_total = len(signals_df)
@@ -598,13 +598,13 @@ with m2:
         hi = int(signals_df["score"].max())
     else:
         hi = None
-    st.metric("Highest score", hi if hi is not None else "—")
+    st.metric("Highest score", hi if hi is not None else "-")
 with m3:
     if n_total:
         modes = signals_df["event_type"].replace("", pd.NA).dropna().mode()
-        common = str(modes.iloc[0]) if len(modes) else "—"
+        common = str(modes.iloc[0]) if len(modes) else "-"
     else:
-        common = "—"
+        common = "-"
     st.metric("Most common event type", common)
 
 st.markdown(
@@ -647,13 +647,13 @@ else:
         used_week_fallback = True
 
 if used_week_fallback and n_total > 0:
-    st.caption("No dated signals in the last 7 days — showing the top 5 by score overall.")
+    st.caption("No dated signals in the last 7 days - showing the top 5 by score overall.")
 
 if len(top_week) == 0 and n_total > 0:
     st.info("No rows to highlight.")
 elif len(top_week) > 0:
     for i, (_, row) in enumerate(top_week.iterrows()):
-        person = row["person_name"] or "—"
+        person = row["person_name"] or "-"
         company = row["company_name"] or "Unknown"
         pe, ce = html.escape(str(person)), html.escape(str(company))
         out_e = html.escape(str(row["outreach_angle"]))
@@ -713,13 +713,13 @@ if not display_df.empty:
     display_df["Detected"] = filtered["detected_at"].apply(human_time_ago)
 if not display_df.empty and "event_date" in display_df.columns:
     display_df["event_date"] = pd.to_datetime(display_df["event_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    display_df["event_date"] = display_df["event_date"].fillna("—")
+    display_df["event_date"] = display_df["event_date"].fillna("-")
 
 st.markdown(
     """
 <div class="ws-section-head">
   <h2 class="ws-h2">All signals</h2>
-  <p class="ws-section-sub">Full feed with filters — <strong>NEW</strong> = detected in the last 48 hours.</p>
+  <p class="ws-section-sub">Full feed with filters - <strong>NEW</strong> = detected in the last 48 hours.</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -758,7 +758,7 @@ st.markdown(
     """
 <div class="ws-section-head">
   <h2 class="ws-h2">Details Explorer</h2>
-  <p class="ws-section-sub">Search and filter the full list — expand rows for deep dives.</p>
+  <p class="ws-section-sub">Search and filter the full list - expand rows for deep dives.</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -803,14 +803,14 @@ if priority_filter != "All":
 st.markdown('<div class="ws-details-panel">', unsafe_allow_html=True)
 
 for _, row in details_filtered.iterrows():
-    person = row["person_name"] or "—"
+    person = row["person_name"] or "-"
     company = row["company_name"] or "Unknown"
     new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
-    title_plain = f"{person} — {row['event_type']} @ {company}"
+    title_plain = f"{person} - {row['event_type']} @ {company}"
     # Expander title must stay plain text for accessibility; show badges inside panel
     ed = row["event_date"]
     if pd.isna(ed):
-        date_str = "—"
+        date_str = "-"
     else:
         ts = pd.Timestamp(ed)
         date_str = ts.strftime("%Y-%m-%d")
