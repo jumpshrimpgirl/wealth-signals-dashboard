@@ -361,17 +361,24 @@ RSS_FEEDS = [
     "http://feeds.bbci.co.uk/news/technology/rss.xml",
     # Reuters
     "http://feeds.reuters.com/reuters/businessNews",
+    "http://feeds.reuters.com/reuters/technologyNews",
     # Financial Times
     "https://www.ft.com/rss/home",
     # Economist
     "https://www.economist.com/business/rss.xml",
     # Bloomberg
     "https://feeds.bloomberg.com/markets/news.rss",
+    "https://feeds.bloomberg.com/wealth/news.rss",
     # Additional global business / markets (same pipeline + FA hard gates apply)
     "https://www.cnbc.com/id/100003114/device/rss/rss.html",
     "https://www.marketwatch.com/rss/topstories",
     "https://www.theguardian.com/uk/business/rss",
     "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+    # Tech / venture (more lead volume; downstream filters apply)
+    "https://techcrunch.com/feed/",
+    "https://venturebeat.com/feed/",
+    "https://www.businessinsider.com/rss",
+    "https://fortune.com/feed/",
 ]
 
 # Browser-like User-Agent: some feeds block generic Python clients.
@@ -3752,8 +3759,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
             if eng_rows:
                 rows.extend(eng_rows)
                 continue
-            if not _wealth_engine.LAST_ENGINE_API_ERROR:
-                continue
+            # Engine returned no rows (common): still run legacy path for volume / recall.
 
         # Legacy: regex + structured AI merge (single primary person per article)
         person, extra_people = _guess_all_person_names(extraction_text)

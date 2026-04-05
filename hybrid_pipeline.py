@@ -300,11 +300,11 @@ def enrich_entity(entity: dict[str, Any]) -> dict[str, Any]:
     co_hint = str(entity.get("company") or "").strip()
     cache_key = _hash_key(f"{name.lower()}|{co_hint.lower()}")
     cached = _get_entity_cache().get(cache_key)
-    if isinstance(cached, dict) and cached.get("_version") == 3:
+    if isinstance(cached, dict) and cached.get("_version") == 4:
         return cached
 
     out: dict[str, Any] = {
-        "_version": 3,
+        "_version": 4,
         "canonical_name": name,
         "role": "",
         "company": "",
@@ -323,8 +323,14 @@ def enrich_entity(entity: dict[str, Any]) -> dict[str, Any]:
         extract, wiki_url, canon_title = _wikipedia_extract_and_url(title)
         out["sources"].append("wikipedia")
         out["wikipedia_url"] = wiki_url
-        out["canonical_name"] = canon_title.replace("_", " ")
+        wiki_display_title = canon_title.replace("_", " ")
+        out["canonical_name"] = wiki_display_title
         out["_wikipedia_extract"] = extract or ""
+        # Never adopt list pages / case titles / band disambiguation as a person's display name
+        from prospect_hardening import is_valid_person_name
+
+        if not is_valid_person_name(wiki_display_title, extract or ""):
+            out["canonical_name"] = name
         el = (extract or "").lower()[:2000]
         out["wiki_bio_deceased"] = (
             ("born" in el and "died" in el)
@@ -659,6 +665,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         select_primary_actor,
     )
     from prospect_hardening import (
+        coerce_display_person_name,
         is_historical_or_dead,
         is_valid_person_name,
         sanitize_role_and_company,
@@ -803,8 +810,11 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         if int(fwc.get("subscore") or 0) >= 12 or founder_wealth_score >= 18:
             row_signal_type = "Founder Wealth Creation"
 
+        display_name = coerce_display_person_name(name, str(cc.get("canonical_name") or ""), summary)
+        if not display_name.strip() or not is_valid_person_name(display_name, summary):
+            continue
         core = build_processed_row_core(
-            name=str(cc.get("canonical_name") or name).strip(),
+            name=display_name.strip(),
             role=str(cc.get("canonical_role") or role_a).strip(),
             company=str(cc.get("canonical_company") or co_san or co_a).strip(),
             signal_type=row_signal_type,

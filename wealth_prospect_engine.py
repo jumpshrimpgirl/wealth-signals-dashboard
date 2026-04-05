@@ -41,6 +41,7 @@ from person_validation import (
     is_valid_person_entity,
     is_valid_role,
 )
+from prospect_hardening import is_valid_person_name as is_valid_prospect_person_name
 
 # --- Config -----------------------------------------------------------------
 
@@ -727,6 +728,8 @@ def process_article_to_rows(
         if not isinstance(cand, dict):
             continue
         person = str(cand.get("person_name") or "").strip()
+        if not is_valid_prospect_person_name(person, blob_for_filter):
+            continue
         company_article = _sanitize_company_field(str(cand.get("company") or ""))
         company_from_search = ""
         company_from_crunchbase = ""
@@ -871,7 +874,12 @@ def process_article_to_rows(
             if not isinstance(c, dict):
                 continue
             n = str(c.get("person_name") or "").strip()
-            if n and n.lower() != person.lower() and is_valid_person_entity(n, blob_for_filter):
+            if (
+                n
+                and n.lower() != person.lower()
+                and is_valid_person_entity(n, blob_for_filter)
+                and is_valid_prospect_person_name(n, blob_for_filter)
+            ):
                 extra_people.append(n)
         extra_people = list(dict.fromkeys(extra_people))[:8]
         extra_people = [x for x in extra_people if x.lower() != person.lower()]

@@ -66,12 +66,35 @@ _UNIVERSITY_OR_GOVT = re.compile(
 )
 
 
+def normalize_person_name_whitespace(name: str) -> str:
+    """Collapse internal whitespace so ``list  of`` still matches ``list of`` guards."""
+    return re.sub(r"\s+", " ", (name or "").strip())
+
+
+def coerce_display_person_name(
+    extracted_name: str,
+    canonical_name: str,
+    article_text: str = "",
+) -> str:
+    """
+    Prefer enrichment canonical only when it passes the same person gate as extraction.
+    Wikipedia often returns list/case/band titles that must not replace a valid article entity.
+    """
+    ex = normalize_person_name_whitespace(extracted_name)
+    ca = normalize_person_name_whitespace(canonical_name)
+    if ca and is_valid_person_name(ca, article_text):
+        return ca
+    if ex and is_valid_person_name(ex, article_text):
+        return ex
+    return ex or ca
+
+
 def is_valid_person_name(name: str, article_text: str = "") -> bool:
     """
     Reject obvious non-person strings; defer shape checks to ``is_valid_person_entity``.
     Article text is used only for optional future proximity checks; hard rules apply to ``name``.
     """
-    n = (name or "").strip()
+    n = normalize_person_name_whitespace(name)
     if not n:
         return False
     low = n.lower()
@@ -95,6 +118,13 @@ def is_valid_person_name(name: str, article_text: str = "") -> bool:
     if len(words) == 1:
         return False
     if low in ("santa", "list of punjabi people", "technology business", "middle east"):
+        return False
+    # UI / wiki search artifacts, disambiguation, band pages, case titles
+    if re.match(r"^search\s*:", low):
+        return False
+    if re.search(r"\bmurder case\b", low):
+        return False
+    if "grass roots" in low and low.startswith("the "):
         return False
     # Plural / category / list artifacts
     if re.search(r"\b(people|americans|investors|founders|executives|billionaires)\s*$", low):
