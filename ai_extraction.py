@@ -1,7 +1,8 @@
 """
-OpenAI-based structured extraction when regex / heuristics miss a valid person name.
+OpenAI-based structured extraction for ingest (multi-pass, field-level).
 
 Requires ``OPENAI_API_KEY``. Optional ``OPENAI_MODEL`` (default ``gpt-4o-mini``).
+Uses ``structured_extraction`` for pass 1 + optional pass 2.
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ import json
 import os
 import re
 from typing import Any
+
+from structured_extraction import apply_display_fallbacks, merge_regex_and_structured, run_structured_extraction
 
 # Canonical labels used across the app / data layer
 _CANONICAL_EVENT_TYPES = frozenset(
@@ -57,95 +60,79 @@ def _normalize_ai_event_type(raw: str) -> str | None:
     return None
 
 
-def extract_signal_with_ai(text: str) -> dict[str, Any]:
+def extract_signal_with_ai(
+    text: str,
+    *,
+    regex_person: str = "",
+    regex_company: str = "",
+    regex_role: str = "",
+    regex_event_type: str = "",
+) -> dict[str, Any]:
     """
-    Call OpenAI to extract person_name, company_name, role, event_type from news text.
+    Multi-pass structured extraction with per-field provenance and optional gap-fill pass 2.
 
-    Returns a dict (possibly empty on error / missing API key). Strings are stripped;
-    unknown fields may be omitted or empty.
+    Returns a dict including legacy keys (``person_name``, ``company_name``, ``role``, …)
+    plus ``extraction_audit_json``, ``why_it_matters``, wealth/liquidity hints, and display fallbacks.
     """
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key or not (text or "").strip():
+    if not (text or "").strip():
         return {}
 
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return {}
+    struct = run_structured_extraction(
+        text,
+        hints={
+            "regex_person_guess": regex_person or "",
+            "regex_company_guess": regex_company or "",
+            "regex_role_guess": regex_role or "",
+            "regex_event_type_guess": regex_event_type or "",
+        },
+    )
+    merged = merge_regex_and_structured(regex_person, regex_company, regex_role, struct)
+    fb = apply_display_fallbacks(struct)
 
-    truncated = (text or "").strip()
-    try:
-        max_chars = int(os.environ.get("OPENAI_EXTRACTION_MAX_CHARS", "28000"))
-    except ValueError:
-        max_chars = 28000
-    max_chars = max(4000, min(max_chars, 100_000))
-    if len(truncated) > max_chars:
-        truncated = truncated[:max_chars] + "\n…"
+    pn = str(merged.get("person_name_merged") or struct.get("person_name") or "").strip()
+    cn = str(merged.get("company_name_merged") or struct.get("company_name") or "").strip()
+    rl = str(merged.get("role_merged") or struct.get("role") or "").strip()
 
-    prompt = f"""
-Extract structured information from this news text for a financial-advisor wealth-signals feed.
-
-Return JSON with:
-- person_name (real human only; use empty string if none)
-- company_name
-- role
-- event_type (one of: Founder Exit, Funding, Promotion, Board Appointment, Other)
-- client_type (one of: Founder / Entrepreneur | Executive | Investor (PE/VC/HF) | Athlete / Celebrity | Heir / Family wealth | unknown)
-- source_of_wealth (short phrase if inferable, e.g. "company sale", "IPO", "funding round", "compensation"; else empty string)
-
-Rules:
-- Only return real people (not companies, not cities)
-- Ignore journalists
-- Ignore vague phrases
-- If unsure, leave the field blank (empty string)
-- Prefer wealth-relevant roles (founder, CEO, investor) when multiple people appear
-
-Text:
-{truncated}
-"""
-
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-    client = OpenAI(api_key=api_key)
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
-    except Exception:
-        return {}
-
-    raw_content = (response.choices[0].message.content or "").strip()
-    if not raw_content:
-        return {}
-
-    try:
-        data = json.loads(raw_content)
-    except json.JSONDecodeError:
-        m = re.search(r"\{[\s\S]*\}", raw_content)
-        if not m:
-            return {}
-        try:
-            data = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return {}
-
-    if not isinstance(data, dict):
-        return {}
-
-    out: dict[str, Any] = {}
-    pn = str(data.get("person_name", "") or "").strip()
-    out["person_name"] = pn
-    out["company_name"] = str(data.get("company_name", "") or "").strip()
-    out["role"] = str(data.get("role", "") or "").strip()
-    et_raw = str(data.get("event_type", "") or "").strip()
+    et_raw = str(struct.get("event_type", "") or "").strip()
     et = _normalize_ai_event_type(et_raw)
-    out["event_type"] = et if et else (et_raw if et_raw in _CANONICAL_EVENT_TYPES else "Other")
+    event_type = et if et else (et_raw if et_raw in _CANONICAL_EVENT_TYPES else "")
 
-    ct = str(data.get("client_type", "") or "").strip()
-    out["client_type"] = ct if ct else ""
-    sow = str(data.get("source_of_wealth", "") or "").strip()
-    out["source_of_wealth"] = sow if sow else ""
+    ct = str(struct.get("client_type", "") or "").strip()
+    sow = str(struct.get("source_of_wealth", "") or "").strip()
+    why = str(struct.get("why_it_matters", "") or "").strip()
+
+    audit = struct.get("_audit") if isinstance(struct.get("_audit"), dict) else {}
+    audit_full = {
+        "ingest": audit,
+        "display": {
+            "person_name": fb.get("person_name_display"),
+            "role": fb.get("role_display"),
+            "company_name": fb.get("company_name_display"),
+            "wealth_signal": fb.get("wealth_signal_display"),
+            "liquidity_event": fb.get("liquidity_event_display"),
+            "source_of_wealth": fb.get("source_of_wealth_display"),
+            "client_type": fb.get("client_type_display"),
+            "estimated_wealth_note": fb.get("estimated_wealth_display"),
+        },
+        "liquidity_normalized": fb.get("liquidity_normalized"),
+        "wealth_signal_for_rules": fb.get("wealth_signal_for_rules"),
+        "wealth_signal_raw": fb.get("wealth_signal_raw"),
+    }
+
+    out: dict[str, Any] = {
+        "person_name": pn,
+        "company_name": cn,
+        "role": rl,
+        "event_type": event_type,
+        "client_type": ct,
+        "source_of_wealth": sow,
+        "why_it_matters": why,
+        "wealth_signal_hint": str(fb.get("wealth_signal_for_rules") or ""),
+        "wealth_signal_raw_hint": str(fb.get("wealth_signal_raw") or ""),
+        "liquidity_hint": str(fb.get("liquidity_normalized") or ""),
+        "estimated_wealth_note": str(struct.get("estimated_wealth_note") or "").strip(),
+        "overall_extraction_confidence": str(struct.get("overall_confidence") or "low"),
+        "extraction_audit_json": json.dumps(audit_full, ensure_ascii=False)[:16000],
+    }
 
     return out

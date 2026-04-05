@@ -71,6 +71,7 @@ SEARCHABLE_COLUMNS = (
     "fa_priority_debug",
     "fa_suppression_level",
     "fa_suppression_reason",
+    "person_name_validation",
 )
 
 # Company field: clear when it looks like a news outlet (substring match on normalized name)
@@ -397,7 +398,7 @@ def ensure_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
                 df[col] = pd.NA
             elif col in ("event_date", "detected_at"):
                 df[col] = pd.NaT
-            elif col.startswith("fa_pass_gate_"):
+            elif col.startswith("fa_pass_gate_") or col.startswith("pv_gate_"):
                 df[col] = False
             else:
                 df[col] = ""
@@ -1210,6 +1211,24 @@ ensure_columns_present(
         "fa_suppression_level",
         "fa_suppression_reason",
         "fa_priority_debug",
+        "pv_prospect_identified",
+        "pv_display_name",
+        "pv_role_title",
+        "pv_wealth_signal",
+        "pv_liquidity_event",
+        "pv_fa_relevance",
+        "pv_why_it_matters",
+        "pv_gate_prospect_pass",
+        "pv_gate_wealth_pass",
+        "pv_gate_fa_relevance_pass",
+        "pv_validation_debug",
+        "pv_estimated_wealth_display",
+        "person_name_validation",
+        "extraction_audit_json",
+        "liquidity_event_hint",
+        "wealth_signal_hint",
+        "wealth_signal_raw_hint",
+        "ingest_overall_extraction_confidence",
     ],
 )
 
@@ -1403,6 +1422,24 @@ ensure_columns_present(
         "fa_suppression_level",
         "fa_suppression_reason",
         "fa_priority_debug",
+        "pv_prospect_identified",
+        "pv_display_name",
+        "pv_role_title",
+        "pv_wealth_signal",
+        "pv_liquidity_event",
+        "pv_fa_relevance",
+        "pv_why_it_matters",
+        "pv_gate_prospect_pass",
+        "pv_gate_wealth_pass",
+        "pv_gate_fa_relevance_pass",
+        "pv_validation_debug",
+        "pv_estimated_wealth_display",
+        "person_name_validation",
+        "extraction_audit_json",
+        "liquidity_event_hint",
+        "wealth_signal_hint",
+        "wealth_signal_raw_hint",
+        "ingest_overall_extraction_confidence",
     ],
 )
 
@@ -1456,6 +1493,15 @@ with st.sidebar.expander("Pipeline & debug", expanded=False):
         st.markdown("**Counts by event_type**")
         _vc = explore_view.get("event_type", pd.Series(dtype=object)).value_counts().rename_axis("event_type").reset_index(name="count")
         st.dataframe(_vc, hide_index=True, use_container_width=True)
+        _ea = explore_view.iloc[0].get("extraction_audit_json", "")
+        if str(_ea or "").strip():
+            st.divider()
+            st.markdown("**Structured extraction audit (first visible row)**")
+            st.caption("Field-level provenance, confidence, and missingness (ingest pass 1 + optional pass 2).")
+            try:
+                st.json(json.loads(str(_ea)))
+            except (json.JSONDecodeError, TypeError):
+                st.code(str(_ea)[:2000], language=None)
     else:
         st.caption("No rows match filters — widen event types or lower the minimum score.")
 
@@ -1723,8 +1769,17 @@ with tab_explore:
                             st.caption(f"Also named in story: {also}")
 
                         st.markdown("##### Prospect")
-                        st.markdown(f"**Name:** {_fa_nonempty(row.get('person_name'), fallback='Not identified')}")
-                        st.markdown(f"**Role / title:** {_fa_nonempty(row.get('role'), fallback='Not identified')}")
+                        _pn_disp = _cell_str(row.get("person_name"))
+                        _rn = _cell_str(row.get("role"))
+                        if not _pn_disp:
+                            _pn_disp = "Not identified"
+                        if _rn and _pn_disp != "Not identified" and _rn.lower() == _pn_disp.lower():
+                            _rn = ""
+                        st.markdown(f"**Name:** {_pn_disp}")
+                        st.markdown(f"**Role / title:** {_rn if _rn else 'Not identified'}")
+                        _pval = _cell_str(row.get("person_name_validation"))
+                        if _pval and _pval != "ok":
+                            st.caption(f"Name validation: {_pval}")
                         st.markdown(f"**Company:** {_fa_nonempty(row.get('company_name'), fallback='Not identified')}")
 
                         st.markdown("##### Wealth & liquidity")
@@ -1771,6 +1826,35 @@ with tab_explore:
                         if _dbg:
                             st.caption("Priority debug (which rules fired)")
                             st.code(_dbg, language=None)
+
+                        st.markdown("##### Prospect validation (final gate)")
+                        st.markdown(
+                            f"**Prospect identified:** {_cell_str(row.get('pv_prospect_identified'))} · "
+                            f"**Name:** {_cell_str(row.get('pv_display_name'))}"
+                        )
+                        st.markdown(
+                            f"**Role / title:** {_cell_str(row.get('pv_role_title'))} · "
+                            f"**Wealth signal:** {_cell_str(row.get('pv_wealth_signal'))} · "
+                            f"**Liquidity:** {_cell_str(row.get('pv_liquidity_event'))}"
+                        )
+                        st.markdown(
+                            f"**FA relevance:** {_cell_str(row.get('pv_fa_relevance'))} · "
+                            f"**Why it matters:** {_cell_str(row.get('pv_why_it_matters'))}"
+                        )
+                        _gpv = row.get("pv_gate_prospect_pass")
+                        _gwv = row.get("pv_gate_wealth_pass")
+                        _gfv = row.get("pv_gate_fa_relevance_pass")
+                        st.caption(
+                            f"Gates — prospect: {_boolish(_gpv)}; wealth signal: {_boolish(_gwv)}; "
+                            f"FA relevance (not Low): {_boolish(_gfv)}"
+                        )
+                        _pvd = _cell_str(row.get("pv_validation_debug"))
+                        if _pvd:
+                            st.caption("Validation trace (debug)")
+                            st.code(_pvd, language=None)
+                        _pvew = _cell_str(row.get("pv_estimated_wealth_display"))
+                        if _pvew:
+                            st.caption(f"Estimated wealth (display): {_pvew}")
 
                         st.markdown("##### AI extraction & advisor ranking")
                         _pq = _cell_str(row.get("prospect_quality"))

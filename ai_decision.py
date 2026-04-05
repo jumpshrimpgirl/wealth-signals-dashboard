@@ -108,41 +108,43 @@ Existing pipeline hints (may be wrong — verify from text):
 
     prompt = f"""You are an intelligent wealth-prospecting assistant for financial advisors.
 
+**Goal:** Extract the **maximum credible** structured value from the article. Prefer filling fields with defensible inference over leaving them empty—then label uncertainty (confidence, provenance in your wording).
+
 Read the article and return ONE JSON object with these keys (strict types):
 
-STRING fields (use "" if unknown):
-- extracted_person_name: primary individual prospect full name if identifiable, else ""
-- extracted_role: their role/title if stated, else ""
-- extracted_company: primary company if any, else ""
+STRING fields (use "" only when no defensible anchor exists):
+- extracted_person_name: primary individual prospect full name if identifiable (infer from bylines/titles when strong), else ""
+- extracted_role: their role/title if stated or clearly inferable, else ""
+- extracted_company: primary company if any or strongly implied, else ""
 - client_type: one of: Founder / Entrepreneur | Executive | Investor (PE/VC/HF) | Athlete / Celebrity | Heir / Family wealth | Other | Unknown
 - wealth_signal: exactly one of: Strong | Moderate | Weak | None
-  (Strong = clear liquidity, large capital event, or verified ultra-wealth context for a targetable person)
+  (use Moderate/Weak when money relevance is plausible from role, deal, or context even if not quantified)
 - liquidity_event: exactly one of: Yes | No | Potential
-- source_of_wealth: short phrase e.g. "company sale", "IPO", "funding equity", "compensation", "inheritance", or ""
+- source_of_wealth: short phrase; infer likely channel when cues exist (e.g. "likely equity from funding context — inference")
 - why_flagged: one short sentence: why this appeared as a wealth-relevant prospecting lead
 - why_matters_for_advisor: one short sentence: money or relationship value for an FA (not outlet prestige)
 - ai_summary: one sentence opportunity summary for an FA (max ~240 chars)
 - ai_why_it_matters: 2-3 sentences, money-focused (liquidity, tax, planning)
 - ai_outreach: one respectful first-touch line
-- ai_client_who: "Name — Role" or best available; "Unknown individual" if unclear
+- ai_client_who: "Name — Role" or best available; describe partial identity if that is all the text supports
 - ai_why_money: one sentence on why money matters here
 - cluster_fingerprint: stable lowercase slug: normalize primary person + company + event gist, e.g. "jane-doe|acme|series-b-2026" or "" if no person
 
 NUMBER or null:
-- estimated_wealth_usd: number (USD) ONLY if evidence supports an order-of-magnitude estimate from the text; else null
+- estimated_wealth_usd: USD number when the text supports an **order-of-magnitude** (explicit deal size, funding round, contract value, or strong contextual bracket). Use null if only vague richness with no scale.
 - wealth_estimate_confidence: exactly one of: none | low | medium | high
-  (none = no estimate; if none or low, estimated_wealth_usd must be null)
+  (use "low" or "medium" when inferring from deal/role context; "none" only when no scale exists at all)
 
 INTEGERS 0-100:
-- extraction_confidence_score: confidence in extracted person/role/company
+- extraction_confidence_score: how much credible structured information you extracted (can be higher when inference is solid)
 - fa_usefulness_score: how useful this row is for an FA seeking wealthy prospects (0-100)
 
 STRING prospect_quality — exactly one of:
 - Excellent prospect | Possible prospect | Low-value prospect | Not actionable
 
 Rules:
-- Do NOT invent net worth without textual support; prefer null + wealth_estimate_confidence "none".
-- General politics, war, macro without a specific wealthy individual → wealth_signal "None", prospect_quality "Not actionable", fa_usefulness_score under 25.
+- Do **not** fabricate precise net worth with no textual basis; **do** infer band/scale when funding, M&A, compensation, or contract amounts are stated or clearly implied.
+- General politics, war, macro without any targetable person or money hook → wealth_signal "None", prospect_quality "Not actionable", fa_usefulness_score under 25.
 - News outlet fame does not increase scores.
 
 {hints}
@@ -158,7 +160,7 @@ Article:
             model=model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.25,
+            temperature=0.35,
         )
     except Exception:
         return out
@@ -207,19 +209,16 @@ Article:
         wconf = "none"
     out["wealth_estimate_confidence"] = wconf
 
+    # Keep numeric estimates whenever the model supplies them with low/medium/high confidence;
+    # uncertainty is shown via wealth_estimate_confidence, not by dropping the field.
     est = data.get("estimated_wealth_usd")
     try:
-        if est is None or wconf in ("", "none") or wconf == "none":
+        if est is None or wconf == "none":
             out["estimated_wealth_usd"] = None
         else:
             f = float(est)
             out["estimated_wealth_usd"] = f if f > 0 else None
-            if wconf == "low" and out["estimated_wealth_usd"] is not None:
-                out["estimated_wealth_usd"] = None
     except (TypeError, ValueError):
-        out["estimated_wealth_usd"] = None
-
-    if out["wealth_estimate_confidence"] in ("none", "low"):
         out["estimated_wealth_usd"] = None
 
     for k in ("extraction_confidence_score", "fa_usefulness_score"):
@@ -456,7 +455,7 @@ def enrich_dataframe_with_ai_decision(df):  # pd.DataFrame
         wconf = str(d.get("wealth_estimate_confidence") or "none").strip().lower()
         out.at[idx, "ai_wealth_estimate_confidence"] = wconf
         out.at[idx, "ai_net_worth_inferred"] = pd.NA
-        if est is not None and wconf in ("medium", "high"):
+        if est is not None and wconf in ("low", "medium", "high"):
             try:
                 ev = float(est)
                 if ev > 0:

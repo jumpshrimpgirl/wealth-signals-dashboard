@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from person_validation import is_valid_person
+from person_validation import prospect_anchor_name_for_fa
 
 # --- Negative / generic story shapes (suppress unless tied to a named wealthy prospect) ---
 
@@ -37,11 +37,6 @@ _RE_NEGATIVE_OPINION_ANALYSIS = re.compile(
     r"\b("
     r"opinion|editorial|explainer|overview|five\s+things|what\s+we\s+learned|the\s+big\s+picture"
     r")\b",
-    re.I,
-)
-
-_RE_NAMED_EXEC_IN_TITLE = re.compile(
-    r"^[^(]+\s+[-–—]\s*(?:CEO|CFO|COO|CTO|CIO|founder|co-founder|chair|president)\b",
     re.I,
 )
 
@@ -81,23 +76,10 @@ def prospect_identified_from_row(
     raw_title: str,
 ) -> tuple[bool, str]:
     """
-    True if we have a plausible named individual (or small set) as a prospect anchor.
-
-    Returns (identified, display_name).
+    True only when ``person_name`` / headline parsing yields a **validated real person**,
+    not a job title or office (see ``person_validation.prospect_anchor_name_for_fa``).
     """
-    pn = str(person_name or "").strip()
-    if pn and is_valid_person(pn):
-        return True, pn
-    for x in _parse_additional_people(additional_people):
-        if x and is_valid_person(x):
-            return True, x
-    # Title pattern: "Jane Doe - CEO ..." (common in press headlines)
-    t = str(raw_title or "").strip()
-    if t and _RE_NAMED_EXEC_IN_TITLE.search(t):
-        lead = t.split(" - ")[0].split(" – ")[0].split(" — ")[0].strip()
-        if lead and is_valid_person(lead):
-            return True, lead
-    return False, ""
+    return prospect_anchor_name_for_fa(person_name, additional_people, raw_title)
 
 
 def classify_suppression(

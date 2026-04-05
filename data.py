@@ -22,7 +22,13 @@ import requests
 from ai_extraction import extract_signal_with_ai
 from ai_decision import enrich_dataframe_with_ai_decision
 from fa_gating import compute_fa_gating_row
-from person_validation import is_valid_person
+from prospect_validation import apply_prospect_validation_layer
+from person_validation import (
+    filter_valid_additional_people,
+    is_role_or_office_only_label,
+    is_valid_person,
+    sanitize_person_name_and_role,
+)
 from score import (
     apply_scores,
     clamp_score_0_100,
@@ -121,6 +127,24 @@ REQUIRED_COLUMNS = [
     "fa_suppression_level",
     "fa_suppression_reason",
     "fa_priority_debug",
+    "pv_prospect_identified",
+    "pv_display_name",
+    "pv_role_title",
+    "pv_wealth_signal",
+    "pv_liquidity_event",
+    "pv_fa_relevance",
+    "pv_why_it_matters",
+    "pv_gate_prospect_pass",
+    "pv_gate_wealth_pass",
+    "pv_gate_fa_relevance_pass",
+    "pv_validation_debug",
+    "pv_estimated_wealth_display",
+    "person_name_validation",
+    "extraction_audit_json",
+    "liquidity_event_hint",
+    "wealth_signal_hint",
+    "wealth_signal_raw_hint",
+    "ingest_overall_extraction_confidence",
 ]
 
 # -----------------------------------------------------------------------------
@@ -2585,6 +2609,9 @@ def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
     """
     if out.empty:
         return
+    for _hc in ("liquidity_event_hint", "wealth_signal_raw_hint", "wealth_signal_hint"):
+        if _hc in out.columns:
+            out[_hc] = out[_hc].fillna("").astype(str)
     for idx in out.index:
         r = out.loc[idx]
         blob = f"{r.get('raw_title', '')} {r.get('full_explanation', '')}"
@@ -2618,6 +2645,9 @@ def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
             funding_stage=str(r.get("funding_stage", "")),
             weak_signal=_row_weak_signal_bool(r.get("weak_signal", False)),
         )
+        wrh = str(r.get("wealth_signal_raw_hint", "") or "").strip()
+        if wrh.lower() == "potential" and strength == "None":
+            strength = "Weak"
         liq = classify_liquidity_event(
             str(r.get("event_type", "")),
             str(r.get("raw_title", "")),
@@ -2625,6 +2655,11 @@ def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
             str(r.get("funding_amount", "")),
             str(r.get("funding_stage", "")),
         )
+        lh = str(r.get("liquidity_event_hint", "") or "").strip()
+        if lh == "Potential" and liq == "No":
+            liq = "Potential"
+        if lh == "Yes" and liq == "No":
+            liq = "Yes"
         ctype = classify_client_type(
             str(r.get("role", "")),
             str(r.get("event_type", "")),
@@ -2681,15 +2716,39 @@ def _apply_wealth_signal_metadata(out: pd.DataFrame) -> None:
         out.at[idx, "fa_priority_debug"] = fr.fa_priority_debug
 
 
+def _apply_person_entity_sanitization(out: pd.DataFrame) -> None:
+    """
+    Strip offices/titles from ``person_name``, split ``Title + Name`` into name vs role,
+    filter ``additional_people``, and set ``person_name_validation`` for debugging.
+    """
+    if out is None or out.empty:
+        return
+    for idx in out.index:
+        pn = str(out.at[idx, "person_name"] or "").strip()
+        rl = str(out.at[idx, "role"] or "").strip()
+        rt = str(out.at[idx, "raw_title"] or "").strip()
+        new_pn, new_rl, note = sanitize_person_name_and_role(pn, rl, rt)
+        out.at[idx, "person_name"] = new_pn
+        out.at[idx, "role"] = new_rl
+        ap = coerce_additional_people_list(out.at[idx, "additional_people"])
+        ap = filter_valid_additional_people(ap)
+        out.at[idx, "additional_people"] = json.dumps(ap)
+        out.at[idx, "person_name_validation"] = note
+
+
 def refresh_derived_wealth_after_ai_decision(out: pd.DataFrame) -> pd.DataFrame:
     """Recompute rank, display wealth, and priority after AI decision layer mutates labels and estimates."""
     if out is None or out.empty:
         return out
+    _apply_person_entity_sanitization(out)
     if "estimated_wealth" in out.columns:
         out["est_wealth_display"] = out["estimated_wealth"].map(format_wealth)
     if "wealth_signal_label" in out.columns:
         out["wealth_rank"] = out["wealth_signal_label"].map(lambda s: wealth_signal_rank(str(s)))
     _apply_wealth_signal_metadata(out)
+    apply_prospect_validation_layer(out)
+    if not out.empty and "priority_level" in out.columns:
+        out["suggested_next_step"] = out["priority_level"].map(suggested_next_step_from_priority)
     return out
 
 
@@ -2900,6 +2959,10 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         out["ai_liquidity_label"] = ""
         out["ai_client_who"] = ""
         out["ai_why_money"] = ""
+
+    # --- Person/entity cleanup: titles and offices never stay in ``person_name`` ---
+    if not out.empty:
+        _apply_person_entity_sanitization(out)
 
     # --- Wealth-signal priority (HNWI / liquidity; not general news importance) ---
     if not out.empty:
@@ -3331,6 +3394,8 @@ def _guess_all_person_names(title: str) -> tuple[str, list[str]]:
             continue
 
         full = f"{first} {last}"
+        if is_role_or_office_only_label(full):
+            continue
         key = full.lower()
         if key in seen:
             continue
@@ -3498,13 +3563,22 @@ def _guess_role(title: str) -> str:
 
 
 def _person_name_fails_validation(person: str) -> bool:
-    """True when regex gave no name or a name that fails ``is_valid_person`` (needs AI fallback)."""
+    """True when regex gave no name, a role/office label, or a name that fails ``is_valid_person``."""
     p = str(person or "").strip()
-    return not p or not is_valid_person(p)
+    if not p:
+        return True
+    if is_role_or_office_only_label(p):
+        return True
+    return not is_valid_person(p)
 
 
 def _ai_extraction_enabled() -> bool:
     return os.environ.get("WEALTH_SIGNALS_AI_EXTRACTION", "1").lower() not in ("0", "false", "no")
+
+
+def _structured_extraction_always() -> bool:
+    """When True (default), run multi-pass structured extraction for every row with an API key."""
+    return os.environ.get("WEALTH_SIGNALS_STRUCTURED_ALWAYS", "1").lower() not in ("0", "false", "no")
 
 
 def _merge_ai_extraction_for_row(
@@ -3516,27 +3590,43 @@ def _merge_ai_extraction_for_row(
     company: str,
     role: str,
     event_type: str,
-) -> tuple[str, list[str], str, str, str, str, str]:
+) -> tuple[str, list[str], str, str, str, str, str, dict[str, Any]]:
     """
-    Hybrid extraction: regex/heuristics first; if ``person_name`` fails validation, call AI
-    and **replace** ``person_name``, ``company_name``, ``role``, and ``event_type`` with the
-    model output (``additional_people`` cleared when AI runs). If the API returns nothing
-    useful, keep regex fields unchanged.
+    Hybrid extraction: regex/heuristics first; structured multi-pass AI merges in field-by-field.
+
+    When ``WEALTH_SIGNALS_STRUCTURED_ALWAYS`` is on (default), AI runs even if regex found a name.
+    Returns ``extras`` for ingest-only columns (audit JSON, hints, structured why-it-matters).
     """
+    extras: dict[str, Any] = {
+        "extraction_audit_json": "",
+        "liquidity_event_hint": "",
+        "wealth_signal_hint": "",
+        "wealth_signal_raw_hint": "",
+        "ingest_why_it_matters": "",
+        "ingest_overall_extraction_confidence": "",
+    }
     if not _ai_extraction_enabled() or not os.environ.get("OPENAI_API_KEY", "").strip():
-        return person, extra_people, company, role, event_type, "", ""
-    if not _person_name_fails_validation(person):
-        return person, extra_people, company, role, event_type, "", ""
-    # Prefer article body first so downstream truncation keeps real paragraphs over the title.
+        p2, r2, _ = sanitize_person_name_and_role(person, role, title)
+        return p2, extra_people, company, r2, event_type, "", "", extras
+    if not _structured_extraction_always() and not _person_name_fails_validation(person):
+        p2, r2, _ = sanitize_person_name_and_role(person, role, title)
+        return p2, extra_people, company, r2, event_type, "", "", extras
+
     chunks = [article_text, title, summary]
     combined = "\n\n".join(c for c in chunks if (c or "").strip()).strip()
     if not combined:
         combined = title
-    parsed = extract_signal_with_ai(combined)
+    parsed = extract_signal_with_ai(
+        combined,
+        regex_person=person,
+        regex_company=company,
+        regex_role=role,
+        regex_event_type=event_type,
+    )
     if not parsed:
-        return person, extra_people, company, role, event_type, "", ""
+        p2, r2, _ = sanitize_person_name_and_role(person, role, title)
+        return p2, extra_people, company, r2, event_type, "", "", extras
 
-    # Full overwrite from AI for structured fields (regex extras dropped — single AI snapshot)
     person = str(parsed.get("person_name", "") or "").strip()
     extra_people = []
     company = normalize_company_name_field(str(parsed.get("company_name", "") or "").strip())
@@ -3546,7 +3636,16 @@ def _merge_ai_extraction_for_row(
         event_type = et_ai
     ct = str(parsed.get("client_type", "") or "").strip()
     sow = str(parsed.get("source_of_wealth", "") or "").strip()
-    return person, extra_people, company, role, event_type, ct, sow
+    person, role, _ = sanitize_person_name_and_role(person, role, title)
+
+    extras["extraction_audit_json"] = str(parsed.get("extraction_audit_json", "") or "")[:20000]
+    extras["liquidity_event_hint"] = str(parsed.get("liquidity_hint", "") or "").strip()
+    extras["wealth_signal_hint"] = str(parsed.get("wealth_signal_hint", "") or "").strip()
+    extras["wealth_signal_raw_hint"] = str(parsed.get("wealth_signal_raw_hint", "") or "").strip()
+    extras["ingest_why_it_matters"] = str(parsed.get("why_it_matters", "") or "").strip()
+    extras["ingest_overall_extraction_confidence"] = str(parsed.get("overall_extraction_confidence", "") or "").strip()
+
+    return person, extra_people, company, role, event_type, ct, sow, extras
 
 
 def _fetch_one_feed(url: str) -> list[Any]:
@@ -3603,8 +3702,8 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         company = _guess_company_name(extraction_text)
         role = _guess_role(extraction_text)
 
-        # 2) If person_name missing or invalid → AI fallback; 3) overwrite with AI output when used
-        person, extra_people, company, role, event_type_merged, client_type_hint, source_of_wealth_hint = (
+        # 2) Structured multi-pass AI (when enabled) merges with regex; 3) sanitize person/role
+        person, extra_people, company, role, event_type_merged, client_type_hint, source_of_wealth_hint, ingest_extras = (
             _merge_ai_extraction_for_row(
                 title, article_paragraphs, summary, person, extra_people, company, role, legacy_et
             )
@@ -3620,6 +3719,9 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         event_type = structured_et if structured_et is not None else event_type_merged
 
         why = why_it_matters_for_event_type(event_type)
+        iw = str(ingest_extras.get("ingest_why_it_matters") or "").strip()
+        if iw:
+            why = iw
 
         rows.append(
             {
@@ -3640,6 +3742,14 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                 "weak_signal": weak_signal,
                 "client_type_hint": client_type_hint,
                 "source_of_wealth_hint": source_of_wealth_hint,
+                "extraction_audit_json": ingest_extras.get("extraction_audit_json", "") or "",
+                "liquidity_event_hint": ingest_extras.get("liquidity_event_hint", "") or "",
+                "wealth_signal_hint": ingest_extras.get("wealth_signal_hint", "") or "",
+                "wealth_signal_raw_hint": ingest_extras.get("wealth_signal_raw_hint", "") or "",
+                "ingest_overall_extraction_confidence": ingest_extras.get(
+                    "ingest_overall_extraction_confidence", ""
+                )
+                or "",
             }
         )
 
