@@ -19,6 +19,8 @@ import pandas as pd
 
 from two_pass_pipeline import compute_recency_score
 
+from prospect_display_gates import normalize_extracted_candidate
+
 _CACHE_ROOT = Path(__file__).resolve().parent / ".cache" / "wealth_pipeline"
 
 # -----------------------------------------------------------------------------
@@ -486,7 +488,7 @@ def classify_wealth_status(
 # 2) AI extraction — structured JSON (OpenAI)
 # =============================================================================
 _CANDIDATE_SCHEMA: dict[str, Any] = {
-    "name": "wealth_article_v3",
+    "name": "wealth_article_v4",
     "strict": True,
     "schema": {
         "type": "object",
@@ -498,6 +500,18 @@ _CANDIDATE_SCHEMA: dict[str, Any] = {
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"},
+                        "entity_type": {
+                            "type": "string",
+                            "enum": [
+                                "person",
+                                "company",
+                                "product",
+                                "organization",
+                                "region",
+                                "event",
+                                "unknown",
+                            ],
+                        },
                         "role": {"type": "string"},
                         "company": {"type": "string"},
                         "context_type": {
@@ -530,18 +544,19 @@ _CANDIDATE_SCHEMA: dict[str, Any] = {
                             "type": "string",
                             "enum": ["high", "medium", "low"],
                         },
+                        "is_valid_prospect_person": {"type": "boolean"},
                         "reason": {"type": "string"},
-                        "is_real_person": {"type": "boolean"},
                     },
                     "required": [
                         "name",
+                        "entity_type",
                         "role",
                         "company",
                         "context_type",
                         "economic_role",
                         "wealth_relevance",
+                        "is_valid_prospect_person",
                         "reason",
-                        "is_real_person",
                     ],
                     "additionalProperties": False,
                 },
@@ -575,19 +590,16 @@ Article body:
 ---
 
 Task:
-- Extract ONLY real individual human beings (named people). Never output regions, sectors, cases, list pages, or companies as names.
-- For each person: name, role, company ONLY when explicitly supported — never invent a company.
-- context_type: primary / secondary / mention / historical / commentary (donor-list or background mention = mention; pundits = commentary).
+- For each notable entity, set entity_type: person | company | product | organization | region | event | unknown.
+- ONLY set is_valid_prospect_person=true for real individual humans you would cold-email as a prospect. Sororities/fraternities (e.g. Delta Delta Delta), car/product models (Tesla Model X), brands, governments, lists, cases, regions are NOT people — entity_type must reflect that and is_valid_prospect_person must be false.
+- name + role + company: fill company ONLY when explicitly stated; never invent or guess a company.
+- Do NOT infer founder exit, funding, or promotion unless the article clearly supports it (funding round, acquisition/sale/stake, appointment).
+- context_type: primary / secondary / mention / historical / commentary — quoted pundits / "told CNBC" without operating relevance = commentary.
 - economic_role: founder, ceo, owner, partner, investor, executive, commentator, lawyer, politician, historical, other.
-- wealth_relevance: high = clear wealth, liquidity, ownership, major funding; medium = business relevance; low = commentary, legal, politics, list-only.
-- reason: one short phrase explaining classification.
-- is_real_person: false for non-humans and bogus strings.
+- wealth_relevance: high = clear ownership/liquidity/funding; medium = business relevance; low = commentary/legal/macro.
 
-Explicitly EXCLUDE and never emit as a person name:
-- "list of Punjabi people", "The Naina Murder Case", "Middle East", "Technology Business", "Santa"
-- fictional characters, bots, generic labels
-
-Explicitly treat donor-list / passing mentions as mention (not primary).
+Explicitly NEVER emit as a person (use entity_type=organization/product/region/event and is_valid_prospect_person=false):
+- Fraternity/sorority triple names, vehicle trim levels, iPhone/Tesla Model, list pages, court cases, regions.
 
 Return strict JSON only (schema enforced)."""
 
@@ -620,7 +632,8 @@ Return strict JSON only (schema enforced)."""
         return None
     if "candidates" not in data:
         return None
-    # Normalize cache / older payloads → v3 fields
+    # Normalize cache / older payloads → v4 fields
+    out_c: list[dict[str, Any]] = []
     for c in data.get("candidates") or []:
         if isinstance(c, dict):
             if "wealth_relevance" not in c:
@@ -628,6 +641,14 @@ Return strict JSON only (schema enforced)."""
             if "reason" not in c:
                 c["reason"] = str(c.get("article_relevance_reason") or c.get("reason") or "")
             c["article_relevance_reason"] = str(c.get("reason") or c.get("article_relevance_reason") or "")
+            if "is_valid_prospect_person" not in c:
+                c["is_valid_prospect_person"] = bool(c.get("is_real_person", True))
+            if "entity_type" not in c:
+                c["entity_type"] = "person" if c.get("is_valid_prospect_person") else "unknown"
+            if "is_real_person" not in c:
+                c["is_real_person"] = c.get("is_valid_prospect_person", True)
+            out_c.append(normalize_extracted_candidate(c))
+    data["candidates"] = out_c
     return data
 
 
@@ -646,7 +667,7 @@ _AI_MEM: dict[str, dict[str, Any]] = {}
 
 def _ai_disk_path(key: str) -> Path:
     _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    return _CACHE_ROOT / f"ai_extract_v2_{key}.json"
+    return _CACHE_ROOT / f"ai_extract_v4_{key}.json"
 
 
 def extract_candidates_with_ai_cached(
@@ -681,14 +702,17 @@ def extract_candidates_with_ai_cached(
 
 def heuristic_candidates_from_row(row: dict[str, Any], summary: str) -> dict[str, Any]:
     """Fallback when AI unavailable; mark as low-trust."""
+    from prospect_hardening import is_valid_person_name
+
     name = str(row.get("person_name") or row.get("name") or "").strip()
-    if not name:
+    if not name or not is_valid_person_name(name, summary):
         return {"article_topic": "", "candidates": [], "_heuristic": True}
     return {
         "article_topic": "",
         "candidates": [
             {
                 "name": name,
+                "entity_type": "person",
                 "role": str(row.get("role") or "").strip(),
                 "company": str(row.get("company_name") or row.get("company") or "").strip(),
                 "context_type": "primary",
@@ -696,6 +720,7 @@ def heuristic_candidates_from_row(row: dict[str, Any], summary: str) -> dict[str
                 "wealth_relevance": "low",
                 "reason": "heuristic_fallback_no_ai",
                 "article_relevance_reason": "heuristic_fallback_no_ai",
+                "is_valid_prospect_person": True,
                 "is_real_person": True,
             }
         ],
@@ -739,7 +764,7 @@ def _actor_selection_score(c: dict[str, Any]) -> float:
         s += 8
     else:
         s -= 15
-    if not c.get("is_real_person", True):
+    if not c.get("is_real_person", True) or not c.get("is_valid_prospect_person", True):
         s -= 500
     return s
 
@@ -755,12 +780,18 @@ def select_primary_actor(
     weak_primary=True → do not label High/Elite automatically (cap downstream).
     """
     del article_signal  # reserved for future use (e.g. signal strength weighting)
+    from prospect_display_gates import is_forbidden_display_name
     from prospect_hardening import is_valid_person_name
 
     people = [
         c
         for c in ai_candidates
-        if isinstance(c, dict) and str(c.get("name") or "").strip() and is_valid_person_name(str(c.get("name")), article_text)
+        if isinstance(c, dict)
+        and str(c.get("name") or "").strip()
+        and c.get("is_valid_prospect_person", c.get("is_real_person", True))
+        and str(c.get("entity_type") or "person").lower() in ("person", "unknown")
+        and not is_forbidden_display_name(str(c.get("name") or ""), article_text)
+        and is_valid_person_name(str(c.get("name")), article_text)
     ]
     if not people:
         return None, True

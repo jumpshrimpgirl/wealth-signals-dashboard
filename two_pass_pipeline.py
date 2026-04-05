@@ -87,6 +87,21 @@ def _normalize_rerank_item(it: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _home_safety_valve(row: dict[str, Any], top5: int, keep: bool) -> tuple[int, bool]:
+    """Final mechanical caps before Home: commentary / display-gate failures cannot Top-5."""
+    from prospect_display_gates import can_render_on_home
+
+    t5 = int(top5)
+    k = bool(keep)
+    if row.get("commentary_only_row"):
+        t5 = min(t5, 35)
+        k = False
+    if not can_render_on_home(row):
+        t5 = min(t5, 35)
+        k = False
+    return t5, k
+
+
 def _numeric_wealth_implausible_for_home(row: dict[str, Any]) -> bool:
     """
     Legacy or buggy rows can still carry huge $ strings without verification.
@@ -290,6 +305,7 @@ Return JSON: results array, one object per index: index, timeliness_now (0-20), 
             keep = False
         if row.get("article_economic_relevance") is False and int(row.get("founder_wealth_score") or 0) < 22:
             keep = False
+        top5, keep = _home_safety_valve(row, top5, keep)
         out.append(
             {
                 "index": i,
@@ -347,6 +363,7 @@ def _rerank_fallback_heuristic(candidate_rows: list[dict[str, Any]]) -> list[dic
             keep = False
         if _numeric_wealth_implausible_for_home(row):
             top5 = min(top5, 28)
+        top5, keep = _home_safety_valve(row, top5, keep)
         reason = "heuristic_fallback_no_openai"
         out.append(
             {
@@ -456,18 +473,26 @@ def build_home_top_view(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     Pick Home cards: ``keep_for_home`` + ``top5_score``, then **prospect_tier** policy
     (majority Tier A; at most one exceptional Tier B; never Tier C).
     """
+    from prospect_display_gates import can_render_on_home
+
     if df is None or df.empty:
         return df
     sub = df[df["top5_score"].notna()].copy()
     if sub.empty:
-        return df.sort_values(
+        alt = df.sort_values(
             "priority_score" if "priority_score" in df.columns else "score", ascending=False
-        ).head(n)
+        ).head(min(len(df), max(n * 6, 24)))
+        alt = alt[alt.apply(lambda r: can_render_on_home(r), axis=1)].head(n)
+        return alt
 
     if "prospect_tier" not in sub.columns:
         sub["prospect_tier"] = "tier_a"
 
     sub = sub.sort_values("top5_score", ascending=False, na_position="last")
+    sub = sub[sub.apply(lambda r: can_render_on_home(r), axis=1)].copy()
+    if sub.empty:
+        return sub
+
     kh = sub["keep_for_home"].fillna(False)
     if kh.dtype == object:
         kh = kh.astype(str).str.lower().isin(("true", "1", "yes"))

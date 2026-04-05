@@ -17,6 +17,7 @@ import streamlit as st
 
 from data import fetch_signals, format_wealth
 from person_validation import is_valid_person
+from prospect_display_gates import can_render_on_home
 from prospect_processor import process_and_rank_prospects
 from two_pass_pipeline import build_home_top_view
 
@@ -984,6 +985,8 @@ def lookup_home_row_for_ai(df: pd.DataFrame, item: dict) -> pd.Series | None:
 
 def render_home_signal_card(row: pd.Series) -> None:
     """Rich card for Home tab (Pass-2 Home score when available)."""
+    if not can_render_on_home(row):
+        return
     header_line = format_signal_header_line(row)
     hl = html.escape(header_line)
     _line = str(row.get("ai_summary", "") or "").strip() or str(row.get("summary", "") or "")[:220]

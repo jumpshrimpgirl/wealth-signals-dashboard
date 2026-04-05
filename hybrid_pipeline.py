@@ -664,6 +664,12 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         score_private_company_context,
         select_primary_actor,
     )
+    from prospect_display_gates import (
+        is_commentary_only,
+        is_forbidden_display_name,
+        normalize_extracted_candidate,
+        sanitize_signal_type,
+    )
     from prospect_hardening import (
         coerce_display_person_name,
         is_historical_or_dead,
@@ -695,7 +701,9 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     if not ai_payload or not ai_payload.get("candidates"):
         ai_payload = heuristic_candidates_from_row(row, summary)
 
-    candidates = [c for c in (ai_payload.get("candidates") or []) if isinstance(c, dict)]
+    candidates = [
+        normalize_extracted_candidate(c) for c in (ai_payload.get("candidates") or []) if isinstance(c, dict)
+    ]
     if not candidates:
         return []
 
@@ -703,7 +711,9 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         is_valid_person_name(str(c.get("name") or "").strip(), summary) for c in candidates
     ) and not ai_payload.get("_heuristic"):
         fb = heuristic_candidates_from_row(row, summary)
-        candidates = [c for c in (fb.get("candidates") or []) if isinstance(c, dict)]
+        candidates = [
+            normalize_extracted_candidate(c) for c in (fb.get("candidates") or []) if isinstance(c, dict)
+        ]
         ai_payload = fb
 
     if not candidates:
@@ -715,8 +725,16 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
 
     out: list[dict[str, Any]] = []
     for c in candidates:
+        et_raw = str(c.get("entity_type") or "").lower()
+        if et_raw in ("company", "product", "organization", "region", "event"):
+            continue
+        if not c.get("is_valid_prospect_person", c.get("is_real_person", True)):
+            continue
+
         name = str(c.get("name") or "").strip()
         if not name:
+            continue
+        if is_forbidden_display_name(name, summary):
             continue
         if not is_valid_person_name(name, summary):
             continue
@@ -759,6 +777,11 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         if dead_hist:
             msc = 0
             m_r = ["dead_or_historical->match_0"]
+
+        commentary_only_row = is_commentary_only(c, summary)
+        if commentary_only_row:
+            msc = min(int(msc), 8)
+            m_r = (m_r or []) + ["commentary_only->match_cap_8"]
 
         pr_adj = pass1_recency_adjustment(published_at)
         combined_match = min(40, int(msc) + int(founder_wealth_score))
@@ -806,9 +829,12 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         if dead_hist:
             label = "Low"
 
-        row_signal_type = str(sig.get("signal_type") or "Other")
-        if int(fwc.get("subscore") or 0) >= 12 or founder_wealth_score >= 18:
-            row_signal_type = "Founder Wealth Creation"
+        row_signal_type = sanitize_signal_type(summary, c, str(sig.get("signal_type") or "Other"))
+        if row_signal_type == "Other" and (
+            int(fwc.get("subscore") or 0) >= 12 or founder_wealth_score >= 18
+        ):
+            if not commentary_only_row and str(c.get("economic_role") or "").lower() != "commentator":
+                row_signal_type = "Founder Wealth Creation"
 
         display_name = coerce_display_person_name(name, str(cc.get("canonical_name") or ""), summary)
         if not display_name.strip() or not is_valid_person_name(display_name, summary):
@@ -868,6 +894,9 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             "ownership_inference": own_inf,
             "wealth_evidence": str(cc.get("wealth_evidence") or "none"),
             "prospect_tier": prospect_tier,
+            "entity_type": str(c.get("entity_type") or "person"),
+            "is_valid_prospect_person": bool(c.get("is_valid_prospect_person", True)),
+            "commentary_only_row": commentary_only_row,
         }
         if SHOW_DEBUG:
             legacy["debug_signal_reasons"] = clean.get("_debug_signal_reasons", "")
