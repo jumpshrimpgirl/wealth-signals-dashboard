@@ -300,11 +300,11 @@ def enrich_entity(entity: dict[str, Any]) -> dict[str, Any]:
     co_hint = str(entity.get("company") or "").strip()
     cache_key = _hash_key(f"{name.lower()}|{co_hint.lower()}")
     cached = _get_entity_cache().get(cache_key)
-    if isinstance(cached, dict) and cached.get("_version") == 2:
+    if isinstance(cached, dict) and cached.get("_version") == 3:
         return cached
 
     out: dict[str, Any] = {
-        "_version": 2,
+        "_version": 3,
         "canonical_name": name,
         "role": "",
         "company": "",
@@ -313,6 +313,8 @@ def enrich_entity(entity: dict[str, Any]) -> dict[str, Any]:
         "wikipedia_url": "",
         "linkedin_url": "",
         "sources": [],
+        "wiki_bio_deceased": False,
+        "_wikipedia_extract": "",
     }
 
     title = _wikipedia_search_first_title(name)
@@ -322,6 +324,13 @@ def enrich_entity(entity: dict[str, Any]) -> dict[str, Any]:
         out["sources"].append("wikipedia")
         out["wikipedia_url"] = wiki_url
         out["canonical_name"] = canon_title.replace("_", " ")
+        out["_wikipedia_extract"] = extract or ""
+        el = (extract or "").lower()[:2000]
+        out["wiki_bio_deceased"] = (
+            ("born" in el and "died" in el)
+            or bool(re.search(r"\bdied\s+\d{4}\b", el))
+            or ("obituary" in el)
+        )
         wr, wc = _parse_wikipedia_role_company(extract)
         if wr:
             out["role"] = wr
@@ -637,15 +646,25 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     """
     from ai_prospect_pipeline import (
         build_processed_row_core,
+        classify_wealth_status,
         compute_match_score,
-        compute_wealth_status,
         cross_check_identity_and_wealth,
         extract_candidates_with_ai_cached,
-        heuristic_candidates_from_row,
+        infer_ownership_strength,
         priority_label_from_priority_score,
         score_article_signal,
+        score_founder_wealth_creation,
+        score_private_company_context,
         select_primary_actor,
     )
+    from prospect_hardening import (
+        is_historical_or_dead,
+        is_valid_person_name,
+        sanitize_company,
+        sanitize_role,
+    )
+    from prospect_tier import apply_tier_priority_adjustment, classify_prospect_tier
+    from settings import SHOW_DEBUG
     from two_pass_pipeline import compute_recency_score, pass1_recency_adjustment
 
     summary = _text_blob(row)
@@ -656,7 +675,9 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
 
     sig = score_article_signal(summary, source_title, published_at)
     sig_r = sig.get("_debug_reasons") or []
-    gate = int(sig.get("signal_score") or 0) >= 25 or bool(sig.get("economic_relevance"))
+    article_economic = bool(sig.get("economic_relevance"))
+    # Broad recall: when OpenAI is configured, always attempt structured extraction (no hard-drop on weak signal).
+    gate = bool(os.environ.get("OPENAI_API_KEY", "").strip()) or int(sig.get("signal_score") or 0) >= 25 or article_economic
 
     ai_payload: dict[str, Any] | None = None
     if gate:
@@ -670,12 +691,26 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     if not candidates:
         return []
 
-    _primary, weak_primary = select_primary_actor(candidates, sig)
+    if not any(
+        is_valid_person_name(str(c.get("name") or "").strip(), summary) for c in candidates
+    ) and not ai_payload.get("_heuristic"):
+        fb = heuristic_candidates_from_row(row, summary)
+        candidates = [c for c in (fb.get("candidates") or []) if isinstance(c, dict)]
+        ai_payload = fb
+
+    if not candidates:
+        return []
+
+    _primary, weak_primary = select_primary_actor(candidates, sig, article_text=summary)
+    if not article_economic:
+        weak_primary = True
 
     out: list[dict[str, Any]] = []
     for c in candidates:
         name = str(c.get("name") or "").strip()
         if not name:
+            continue
+        if not is_valid_person_name(name, summary):
             continue
         if not hard_filter_entity(
             {
@@ -690,17 +725,68 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
 
         role_a = str(c.get("role") or "").strip()
         co_a = str(c.get("company") or "").strip()
-        cc = cross_check_identity_and_wealth(name, co_a, role_a, article_summary=summary)
-        msc, m_r = compute_match_score(c, cc)
+        ctx_t = str(c.get("context_type") or "mention")
+        eco_r = str(c.get("economic_role") or "other")
+
+        cc = cross_check_identity_and_wealth(
+            name,
+            co_a,
+            role_a,
+            article_summary=summary,
+            context_type=ctx_t,
+            economic_role=eco_r,
+        )
+
+        co_san, _co_bad = sanitize_company(str(cc.get("canonical_company") or co_a), summary)
+        role_san, _ = sanitize_role(name, str(cc.get("canonical_role") or role_a), summary, cc)
+        cc = {**cc, "canonical_company": co_san, "canonical_role": role_san}
+
+        fwc = score_founder_wealth_creation(summary, c, cc)
+        priv = score_private_company_context(summary, c, cc)
+        founder_wealth_score = min(40, int(fwc.get("subscore") or 0) + int(priv.get("subscore") or 0))
+        own_inf = infer_ownership_strength(summary, c, cc)
+        cc = {**cc, "ownership_inference": own_inf}
+
+        dead_hist = is_historical_or_dead(name, summary, cc)
+        msc, m_r = compute_match_score(c, cc, summary)
+        if dead_hist:
+            msc = 0
+            m_r = ["dead_or_historical->match_0"]
 
         pr_adj = pass1_recency_adjustment(published_at)
-        prio = int(sig.get("signal_score") or 0) + int(msc) + pr_adj
-        if weak_primary:
+        combined_match = min(40, int(msc) + int(founder_wealth_score))
+        prio = int(sig.get("signal_score") or 0) + combined_match + pr_adj
+        strong_founder_ops = founder_wealth_score >= 22
+        if weak_primary and not strong_founder_ops:
+            prio = min(prio, 74)
+        if dead_hist:
+            prio = min(prio, 20)
+        if not article_economic and not strong_founder_ops:
             prio = min(prio, 74)
         prio = max(0, min(100, prio))
+
+        wstat = classify_wealth_status(summary, c, cc)
+        prospect_tier = classify_prospect_tier(
+            c,
+            {
+                **cc,
+                "_tier_article_summary": summary,
+                "_tier_wealth_status": wstat,
+                "_tier_founder_wealth_score": founder_wealth_score,
+            },
+        )
+        prio = apply_tier_priority_adjustment(prio, prospect_tier)
+        prio = max(0, min(100, prio))
+
         label = priority_label_from_priority_score(prio)
-        if weak_primary and label in ("Elite", "High"):
+        if weak_primary and label in ("Elite", "High") and not strong_founder_ops:
             label = "Medium"
+        if dead_hist:
+            label = "Low"
+
+        row_signal_type = str(sig.get("signal_type") or "Other")
+        if int(fwc.get("subscore") or 0) >= 12 or founder_wealth_score >= 18:
+            row_signal_type = "Founder Wealth Creation"
 
         est = str(cc.get("est_wealth") or "").strip()
         if not est:
@@ -709,8 +795,8 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         core = build_processed_row_core(
             name=str(cc.get("canonical_name") or name).strip(),
             role=str(cc.get("canonical_role") or role_a).strip(),
-            company=str(cc.get("canonical_company") or co_a).strip(),
-            signal_type=str(sig.get("signal_type") or "Other"),
+            company=str(cc.get("canonical_company") or co_san or co_a).strip(),
+            signal_type=row_signal_type,
             signal_score=int(sig.get("signal_score") or 0),
             match_score=msc,
             priority_label=label,
@@ -718,8 +804,8 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             source_title=source_title,
             source_url=source_url,
             summary=summary,
-            context_type=str(c.get("context_type") or "mention"),
-            economic_role=str(c.get("economic_role") or "other"),
+            context_type=ctx_t,
+            economic_role=eco_r,
             identity_confidence=float(cc.get("identity_confidence") or 0.0),
             verification_sources_used=list(cc.get("verification_sources_used") or []),
             priority_score=prio,
@@ -729,11 +815,11 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             **core,
             "source": source_url or source_title,
             "_recency_ts": recency,
-            "_debug_signal_reasons": "; ".join(str(x) for x in sig_r),
-            "_debug_match_reasons": "; ".join(m_r),
         }
+        if SHOW_DEBUG:
+            clean["_debug_signal_reasons"] = "; ".join(str(x) for x in sig_r)
+            clean["_debug_match_reasons"] = "; ".join(m_r)
 
-        wstat = compute_wealth_status(cc, summary, str(c.get("economic_role") or ""))
         legacy = {
             **row,
             **clean,
@@ -750,10 +836,19 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             "recency_score": compute_recency_score(published_at),
             "wealth_status": wstat,
             "wealth_relevance": str(c.get("wealth_relevance") or "medium"),
-            "article_relevance_reason": str(c.get("article_relevance_reason") or ""),
-            "debug_signal_reasons": clean["_debug_signal_reasons"],
-            "debug_match_reasons": clean["_debug_match_reasons"],
+            "article_relevance_reason": str(
+                c.get("article_relevance_reason") or c.get("reason") or ""
+            ),
+            "article_economic_relevance": article_economic,
+            "candidate_historical_dead": dead_hist,
+            "founder_wealth_score": founder_wealth_score,
+            "ownership_inference": own_inf,
+            "wealth_evidence": str(cc.get("wealth_evidence") or "none"),
+            "prospect_tier": prospect_tier,
         }
+        if SHOW_DEBUG:
+            legacy["debug_signal_reasons"] = clean.get("_debug_signal_reasons", "")
+            legacy["debug_match_reasons"] = clean.get("_debug_match_reasons", "")
         for drop_k in (
             "ai_fa_usefulness_score",
             "prospect_quality",
@@ -803,6 +898,8 @@ def process_articles(raw_articles: pd.DataFrame | list[dict[str, Any]]) -> list[
 
 def to_clean_dataframe(processed: list[dict[str, Any]]) -> pd.DataFrame:
     """Narrow columns for export / inspection (aligned with AI pipeline output)."""
+    from settings import SHOW_DEBUG
+
     cols = (
         "name",
         "role",
@@ -813,11 +910,17 @@ def to_clean_dataframe(processed: list[dict[str, Any]]) -> pd.DataFrame:
         "priority_score",
         "priority_label",
         "est_wealth",
+        "wealth_status",
+        "published_at",
         "source_title",
         "source_url",
         "summary",
     )
     rows = []
     for p in processed:
-        rows.append({c: p.get(c) for c in cols})
+        row = {c: p.get(c) for c in cols}
+        if SHOW_DEBUG:
+            row["debug_signal_reasons"] = p.get("debug_signal_reasons")
+            row["debug_match_reasons"] = p.get("debug_match_reasons")
+        rows.append(row)
     return pd.DataFrame(rows)

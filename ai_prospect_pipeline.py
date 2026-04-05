@@ -17,6 +17,8 @@ from typing import Any
 
 import pandas as pd
 
+from two_pass_pipeline import compute_recency_score
+
 _CACHE_ROOT = Path(__file__).resolve().parent / ".cache" / "wealth_pipeline"
 
 # -----------------------------------------------------------------------------
@@ -64,17 +66,20 @@ def score_article_signal(
 ) -> dict[str, Any]:
     """
     Returns:
-      signal_score: 0–60
+      signal_score: 0–60 (recency is separate: ``compute_recency_score`` / Pass 1 adjustment)
       signal_type: coarse label
-      economic_relevance: bool (deal / money / business story)
+      economic_relevance: bool — False mainly for lawsuit/regulation/politics/commentary
+        without a clear business/liquidity/fundraising event
     """
-    t = f"{source_title or ''} {article_text or ''}".lower()
+    del published_at  # freshness not part of signal_score per spec
+    t = f"{source_title or ''} {article_text or ''}"
+    tl = t.lower()
     reasons: list[str] = []
     pts = 0
     stype = "Other"
 
     if any(
-        k in t
+        k in tl
         for k in (
             "raised",
             "raising",
@@ -93,7 +98,7 @@ def score_article_signal(
         reasons.append("+30 funding")
 
     if any(
-        k in t
+        k in tl
         for k in (
             "acquisition",
             "merger",
@@ -112,7 +117,7 @@ def score_article_signal(
             stype = "M&A"
         reasons.append("+30 m&a")
 
-    if any(k in t for k in ("revenue", "growth", "profit", "valuation", "earnings")):
+    if any(k in tl for k in ("revenue", "growth", "profit", "valuation", "earnings")):
         pts += 20
         if stype == "Other":
             stype = "Revenue"
@@ -125,47 +130,96 @@ def score_article_signal(
     elif max_usd >= 1e8:
         pts += 20
         reasons.append("+20 $100M+")
-    elif max_usd >= 1e6:
-        pts += 10
-        reasons.append("+10 $1M+")
-
-    # Freshness
-    try:
-        dt = pd.Timestamp(published_at)
-        if dt.tzinfo is None:
-            dt = dt.tz_localize("UTC")
-        from datetime import timezone
-
-        age_h = (pd.Timestamp.now(tz=timezone.utc) - dt).total_seconds() / 3600
-        if age_h <= 72:
-            pts += 8
-            reasons.append("+8 fresh")
-    except Exception:
-        if any(k in t for k in ("today", "hours ago", "just announced", "breaking")):
-            pts += 8
-            reasons.append("+8 recency_keywords")
 
     capped = min(60, pts)
-    economic_relevance = bool(
-        capped >= 15
-        or max_usd >= 1e6
-        or any(
-            k in t
-            for k in (
-                "billion",
-                "million",
-                "funding",
-                "acquisition",
-                "merger",
-                "ipo",
-                "valuation",
-                "investment",
-                "startup",
-                "founder",
-                "ceo",
-            )
+
+    # Founder-led operational wealth (private scale, revenue explosions) — parity with funding/M&A as FA triggers
+    founder_exec = any(
+        k in tl
+        for k in (
+            "founder",
+            "co-founder",
+            "cofounder",
+            "chief executive",
+            "chief executive officer",
         )
+    ) or re.search(r"\bceo\b", tl) is not None
+    revenue_ops = any(
+        k in tl for k in ("revenue", "sales", "profit", "grew", "growth", "scaling", "earnings")
     )
+    if founder_exec and revenue_ops:
+        if max_usd >= 1e9:
+            pts = max(pts, 55)
+            stype = "Founder Wealth Creation"
+            reasons.append("+founder_wealth_$1B+_scale")
+        elif max_usd >= 1e8:
+            pts = max(pts, 45)
+            if stype in ("Other", "Revenue"):
+                stype = "Founder Wealth Creation"
+            reasons.append("+founder_wealth_$100M+_scale")
+        elif max_usd >= 1e7:
+            pts = max(pts, 35)
+            if stype == "Other":
+                stype = "Founder Wealth Creation"
+            reasons.append("+founder_wealth_strong_scale")
+    capped = min(60, pts)
+
+    # Mainly non-economic stories: lawsuits, pure legal procedure, regulation noise,
+    # political analysis, commentary — unless a clear business / liquidity / funding event
+    deal_or_liquidity = any(
+        k in tl
+        for k in (
+            "raised",
+            "funding",
+            "series ",
+            "valuation",
+            "acquisition",
+            "merger",
+            "ipo",
+            "stake",
+            "buyout",
+            "ownership",
+            "liquidity",
+            "business expansion",
+            "investment",
+            "founder",
+            "co-founder",
+            "chief executive",
+            "ceo of",
+        )
+    ) or max_usd >= 1e6 or (
+        founder_exec
+        and revenue_ops
+        and max_usd >= 1e7
+    )
+
+    mainly_non_economic = any(
+        k in tl
+        for k in (
+            "lawsuit",
+            "litigation",
+            "plaintiff",
+            "defendant",
+            "legal procedure",
+            "court filing",
+            "regulatory fine",
+            "political analysis",
+            "opinion:",
+            "commentary:",
+            "editorial:",
+            "election odds",
+            "campaign ad",
+        )
+    ) or (
+        "regulation" in tl
+        and not any(x in tl for x in ("startup", "funding", "ipo", "merger", "acquisition"))
+    )
+
+    economic_relevance = bool(not (mainly_non_economic and not deal_or_liquidity))
+
+    if not economic_relevance:
+        capped = min(15, capped)
+        reasons.append("cap15_non_economic")
 
     return {
         "signal_score": capped,
@@ -177,10 +231,262 @@ def score_article_signal(
 
 
 # =============================================================================
+# Founder wealth creation (operational scale, private ownership) — FA triggers
+# =============================================================================
+def _actor_is_founder_operator(candidate: dict[str, Any], cross: dict[str, Any]) -> bool:
+    er = str(candidate.get("economic_role") or "").lower()
+    if er in ("founder", "ceo", "owner") or "founder" in er:
+        return True
+    rl = (
+        str(candidate.get("role") or "")
+        + " "
+        + str(cross.get("canonical_role") or "")
+    ).lower()
+    return any(
+        x in rl
+        for x in (
+            "founder",
+            "co-founder",
+            "cofounder",
+            "chief executive",
+            "ceo",
+            "owner",
+        )
+    )
+
+
+def score_founder_wealth_creation(
+    article_text: str,
+    extracted_actor: dict[str, Any],
+    cross_check_result: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Subscore 0–40: founder/CEO/owner + large revenue/profit scale without requiring funding/M&A.
+    """
+    t = (article_text or "").lower()
+    reasons: list[str] = []
+    s = 0
+
+    if not _actor_is_founder_operator(extracted_actor, cross_check_result):
+        return {"subscore": 0, "reasons": ["not_founder_operator"], "raw_before_cap": 0}
+
+    er = str(extracted_actor.get("economic_role") or "").lower()
+    if er not in ("founder", "ceo", "owner", "executive", "investor", "other") and "founder" not in er:
+        if not any(
+            x
+            in (
+                str(extracted_actor.get("role") or "")
+                + str(cross_check_result.get("canonical_role") or "")
+            ).lower()
+            for x in ("founder", "ceo", "owner", "chief executive")
+        ):
+            return {"subscore": 0, "reasons": ["role_not_founder_class"], "raw_before_cap": 0}
+
+    if any(
+        k in t
+        for k in (
+            "revenue",
+            "sales",
+            "profit",
+            "profitable",
+            "grew",
+            "growth",
+            "earnings",
+            "valuation",
+            "scale",
+            "scaling",
+        )
+    ):
+        s += 25
+        reasons.append("+25 revenue_profit_growth")
+
+    max_usd = _largest_money_usd(article_text or "")
+    if max_usd >= 1e9:
+        s += 30
+        reasons.append("+30 $1B+_mentioned")
+    elif max_usd >= 1e8:
+        s += 20
+        reasons.append("+20 $100M+_mentioned")
+
+    conc = (
+        "bootstrapped",
+        "self-funded",
+        "no outside funding",
+        "without raising",
+        "no venture",
+        "concentrated",
+        "controlling stake",
+        "majority stake",
+        "owns ",
+        "ownership",
+        "his company",
+        "her company",
+    )
+    if any(k in t for k in conc):
+        s += 15
+        reasons.append("+15 ownership_clues")
+
+    private_led = (
+        "privately held",
+        "private company",
+        "private business",
+        "founder-led",
+        "family-owned",
+        "no institutional",
+        "never raised",
+    )
+    if any(k in t for k in private_led):
+        s += 10
+        reasons.append("+10 private_founder_led")
+
+    raw = s
+    return {"subscore": max(0, min(40, raw)), "reasons": reasons, "raw_before_cap": raw}
+
+
+def score_private_company_context(
+    article_text: str,
+    candidate: dict[str, Any],
+    cross_check_result: dict[str, Any],
+) -> dict[str, Any]:
+    """0–15: private / bootstrap / thin-team scale; folded into founder cap with score_founder_wealth_creation."""
+    del cross_check_result
+    t = (article_text or "").lower()
+    s = 0
+    rs: list[str] = []
+    if not _actor_is_founder_operator(candidate, cross_check_result):
+        return {"subscore": 0, "reasons": []}
+
+    if any(
+        k in t
+        for k in (
+            "privately held",
+            "private company",
+            "private ",
+            "not publicly traded",
+            "bootstrapped",
+            "self-funded",
+        )
+    ):
+        s += 6
+        rs.append("+6 private_bootstrap")
+
+    if re.search(r"\b\d{1,3}[-–]\s*(person|people|employee|team members)\b", t) and (
+        "revenue" in t or "sales" in t or _largest_money_usd(article_text or "") >= 1e7
+    ):
+        s += 5
+        rs.append("+5 small_team_scale")
+
+    if "founder" in t and "ceo" in t and str(candidate.get("context_type") or "") == "primary":
+        s += 4
+        rs.append("+4 primary_founder_framing")
+
+    return {"subscore": min(15, s), "reasons": rs}
+
+
+def infer_ownership_strength(
+    article_text: str,
+    candidate: dict[str, Any],
+    cross_check_result: dict[str, Any],
+) -> str:
+    """high | medium | low — concentrated equity / founder control likelihood."""
+    t = (article_text or "").lower()
+    en = cross_check_result.get("_enrichment") or {}
+    wiki = str(en.get("_wikipedia_extract") or "").lower()[:600] if isinstance(en, dict) else ""
+
+    score = 0
+    if any(
+        k in t
+        for k in (
+            "bootstrapped",
+            "self-funded",
+            "no outside funding",
+            "never raised",
+            "without taking venture",
+            "concentrated ownership",
+            "majority stake",
+            "controlling interest",
+        )
+    ):
+        score += 3
+    if any(k in t for k in ("founded", "started the company", "launched", "built the business")):
+        score += 2
+    if str(candidate.get("context_type") or "") == "primary":
+        score += 2
+    if "private" in t and "company" in t:
+        score += 1
+    if "ipo" in t or "went public" in t or "spac" in t:
+        score -= 2
+    if "privately held" in wiki or ("private" in wiki and "company" in wiki):
+        score += 1
+
+    if score >= 5:
+        return "high"
+    if score >= 2:
+        return "medium"
+    return "low"
+
+
+def classify_wealth_status(
+    article_text: str,
+    candidate: dict[str, Any],
+    cross_check_result: dict[str, Any],
+) -> str:
+    """verified_wealth | likely_wealth | emerging_founder | unclear — Medvi-style → likely_wealth."""
+    we = str(cross_check_result.get("wealth_evidence") or "none")
+    er = str(candidate.get("economic_role") or "").lower()
+    t = (article_text or "").lower()
+    fwc = int(score_founder_wealth_creation(article_text, candidate, cross_check_result).get("subscore") or 0)
+    own = infer_ownership_strength(article_text, candidate, cross_check_result)
+    big_money = _largest_money_usd(article_text or "") >= 1e8
+
+    if we == "direct" or cross_check_result.get("_wealth_list", {}).get("list_match"):
+        return "verified_wealth"
+
+    strong_ops = fwc >= 20 or (
+        big_money
+        and any(k in t for k in ("revenue", "sales", "profit", "grew", "growth"))
+        and _actor_is_founder_operator(candidate, cross_check_result)
+    )
+
+    if strong_ops and (
+        er in ("founder", "ceo", "owner", "investor")
+        or "founder" in er
+        or _actor_is_founder_operator(candidate, cross_check_result)
+    ):
+        return "likely_wealth"
+
+    if we == "indirect" and er in ("founder", "ceo", "owner"):
+        return "likely_wealth"
+
+    if any(
+        k in t
+        for k in (
+            "raised",
+            "series ",
+            "funding",
+            "valuation",
+            "billion",
+            "million",
+            "revenue",
+            "sales",
+        )
+    ) and er in ("founder", "ceo", "owner", "investor"):
+        return "likely_wealth"
+
+    if own == "high" and fwc >= 15 and er in ("founder", "ceo", "owner"):
+        return "likely_wealth"
+
+    if er == "founder" or "founder" in str(candidate.get("role") or "").lower():
+        return "emerging_founder"
+
+    return "unclear"
+
+
+# =============================================================================
 # 2) AI extraction — structured JSON (OpenAI)
 # =============================================================================
 _CANDIDATE_SCHEMA: dict[str, Any] = {
-    "name": "wealth_article_v2",
+    "name": "wealth_article_v3",
     "strict": True,
     "schema": {
         "type": "object",
@@ -196,7 +502,13 @@ _CANDIDATE_SCHEMA: dict[str, Any] = {
                         "company": {"type": "string"},
                         "context_type": {
                             "type": "string",
-                            "enum": ["primary", "secondary", "mention"],
+                            "enum": [
+                                "primary",
+                                "secondary",
+                                "mention",
+                                "historical",
+                                "commentary",
+                            ],
                         },
                         "economic_role": {
                             "type": "string",
@@ -210,6 +522,7 @@ _CANDIDATE_SCHEMA: dict[str, Any] = {
                                 "commentator",
                                 "lawyer",
                                 "politician",
+                                "historical",
                                 "other",
                             ],
                         },
@@ -217,7 +530,7 @@ _CANDIDATE_SCHEMA: dict[str, Any] = {
                             "type": "string",
                             "enum": ["high", "medium", "low"],
                         },
-                        "article_relevance_reason": {"type": "string"},
+                        "reason": {"type": "string"},
                         "is_real_person": {"type": "boolean"},
                     },
                     "required": [
@@ -227,7 +540,7 @@ _CANDIDATE_SCHEMA: dict[str, Any] = {
                         "context_type",
                         "economic_role",
                         "wealth_relevance",
-                        "article_relevance_reason",
+                        "reason",
                         "is_real_person",
                     ],
                     "additionalProperties": False,
@@ -262,13 +575,19 @@ Article body:
 ---
 
 Task:
-- List ALL named people in the article.
-- For each: name, role, company ONLY when explicitly supported — never invent a company.
-- context_type: primary / secondary / mention (donor lists, quotes = mention).
-- economic_role: founder, ceo, owner, partner, investor, executive, commentator, lawyer, politician, other.
-- wealth_relevance: high = clear wealth creation, liquidity, ownership, major funding; medium = some business relevance; low = commentary, politics, legal counsel, list-only.
-- article_relevance_reason: one short phrase explaining classification.
-- is_real_person: false for regions, agencies, companies-as-names, "Middle East", "Technology Business".
+- Extract ONLY real individual human beings (named people). Never output regions, sectors, cases, list pages, or companies as names.
+- For each person: name, role, company ONLY when explicitly supported — never invent a company.
+- context_type: primary / secondary / mention / historical / commentary (donor-list or background mention = mention; pundits = commentary).
+- economic_role: founder, ceo, owner, partner, investor, executive, commentator, lawyer, politician, historical, other.
+- wealth_relevance: high = clear wealth, liquidity, ownership, major funding; medium = business relevance; low = commentary, legal, politics, list-only.
+- reason: one short phrase explaining classification.
+- is_real_person: false for non-humans and bogus strings.
+
+Explicitly EXCLUDE and never emit as a person name:
+- "list of Punjabi people", "The Naina Murder Case", "Middle East", "Technology Business", "Santa"
+- fictional characters, bots, generic labels
+
+Explicitly treat donor-list / passing mentions as mention (not primary).
 
 Return strict JSON only (schema enforced)."""
 
@@ -301,13 +620,14 @@ Return strict JSON only (schema enforced)."""
         return None
     if "candidates" not in data:
         return None
-    # Normalize v1 cache → v2 fields
+    # Normalize cache / older payloads → v3 fields
     for c in data.get("candidates") or []:
         if isinstance(c, dict):
             if "wealth_relevance" not in c:
                 c["wealth_relevance"] = "medium"
-            if "article_relevance_reason" not in c:
-                c["article_relevance_reason"] = str(c.get("reason") or "")
+            if "reason" not in c:
+                c["reason"] = str(c.get("article_relevance_reason") or c.get("reason") or "")
+            c["article_relevance_reason"] = str(c.get("reason") or c.get("article_relevance_reason") or "")
     return data
 
 
@@ -374,6 +694,7 @@ def heuristic_candidates_from_row(row: dict[str, Any], summary: str) -> dict[str
                 "context_type": "primary",
                 "economic_role": "other",
                 "wealth_relevance": "low",
+                "reason": "heuristic_fallback_no_ai",
                 "article_relevance_reason": "heuristic_fallback_no_ai",
                 "is_real_person": True,
             }
@@ -397,6 +718,8 @@ def _actor_selection_score(c: dict[str, Any]) -> float:
         s += 100
     elif ct == "secondary":
         s += 50
+    elif ct in ("historical", "commentary"):
+        s -= 80
     else:
         s += 10
     if er in _GOOD_ROLES:
@@ -405,6 +728,8 @@ def _actor_selection_score(c: dict[str, Any]) -> float:
         s += 40
     elif er in _BAD_ROLES:
         s -= 120
+    elif er == "historical":
+        s -= 100
     elif er == "other":
         s += 5
     wr = str(c.get("wealth_relevance") or "medium").lower()
@@ -422,13 +747,21 @@ def _actor_selection_score(c: dict[str, Any]) -> float:
 def select_primary_actor(
     ai_candidates: list[dict[str, Any]],
     article_signal: dict[str, Any],
+    *,
+    article_text: str = "",
 ) -> tuple[dict[str, Any] | None, bool]:
     """
     Pick the best primary-like candidate. Returns (candidate, weak_primary).
     weak_primary=True → do not label High/Elite automatically (cap downstream).
     """
     del article_signal  # reserved for future use (e.g. signal strength weighting)
-    people = [c for c in ai_candidates if isinstance(c, dict) and str(c.get("name") or "").strip()]
+    from prospect_hardening import is_valid_person_name
+
+    people = [
+        c
+        for c in ai_candidates
+        if isinstance(c, dict) and str(c.get("name") or "").strip() and is_valid_person_name(str(c.get("name")), article_text)
+    ]
     if not people:
         return None, True
     scored = sorted(people, key=_actor_selection_score, reverse=True)
@@ -550,6 +883,8 @@ def cross_check_identity_and_wealth(
     role: str,
     *,
     article_summary: str = "",
+    context_type: str = "",
+    economic_role: str = "",
 ) -> dict[str, Any]:
     """
     Multi-source identity + wealth hints (extends ``cross_check_identity``).
@@ -558,6 +893,21 @@ def cross_check_identity_and_wealth(
     base = cross_check_identity(name, role, company)
     notes: list[str] = [str(x) for x in (base.get("verification_sources_used") or [])]
     wl = base.get("_wealth_list") or {}
+    en = base.get("_enrichment") or {}
+    wiki_ex = str(en.get("_wikipedia_extract") or "") if isinstance(en, dict) else ""
+
+    deceased = bool(en.get("wiki_bio_deceased")) if isinstance(en, dict) else False
+    if not deceased and wiki_ex:
+        wl_ex = wiki_ex.lower()[:2000]
+        deceased = ("born" in wl_ex and "died" in wl_ex) or bool(
+            re.search(r"\bdied\s+\d{4}\b", wl_ex)
+        )
+
+    historical_only = (
+        str(context_type or "").lower() == "historical"
+        or str(economic_role or "").lower() == "historical"
+        or ("historian" in wiki_ex.lower()[:1200] if wiki_ex else False)
+    )
 
     wealth_evidence = "none"
     nw = base.get("est_wealth") or None
@@ -567,6 +917,19 @@ def cross_check_identity_and_wealth(
         notes.append("list_or_explicit_net_worth")
     elif base.get("prominence_tag") == "forbes_billionaires":
         wealth_evidence = "direct"
+    elif (
+        _largest_money_usd(article_summary or "") >= 1e8
+        and any(
+            k in (article_summary or "").lower()
+            for k in ("revenue", "sales", "profit", "grew", "growth", "scaling", "earnings")
+        )
+        and any(
+            k in (article_summary or "").lower()
+            for k in ("founder", "co-founder", "ceo", "chief executive", "owner")
+        )
+    ):
+        wealth_evidence = "indirect"
+        notes.append("operational_scale_founder")
     elif any(
         k in (article_summary or "").lower()
         for k in ("raised", "series", "valuation", "funding", "ipo", "acquisition")
@@ -576,6 +939,8 @@ def cross_check_identity_and_wealth(
     sow = ""
     if wl.get("list_match"):
         sow = "Forbes-style list / public prominence"
+    elif wealth_evidence == "indirect" and any("operational_scale_founder" in str(n) for n in notes):
+        sow = "Large operational scale / founder-led business (inference)"
     elif wealth_evidence == "indirect":
         sow = "Funding / growth / executive role (inference)"
 
@@ -583,10 +948,15 @@ def cross_check_identity_and_wealth(
 
     return {
         **base,
+        "canonical_name": str(base.get("canonical_name") or name).strip(),
+        "canonical_company": str(base.get("canonical_company") or company).strip(),
+        "canonical_role": str(base.get("canonical_role") or role).strip(),
         "wealth_evidence": wealth_evidence,
         "net_worth": nw if wealth_evidence == "direct" else None,
         "source_of_wealth_hint": sow,
         "verification_count": vc,
+        "deceased": deceased,
+        "historical_only": historical_only,
         "notes": notes[:12],
     }
 
@@ -596,24 +966,13 @@ def compute_wealth_status(
     article_summary: str,
     economic_role: str,
 ) -> str:
-    """verified_wealth | likely_wealth | emerging_founder | unclear"""
-    we = str(cross.get("wealth_evidence") or "none")
-    er = (economic_role or "").lower()
-    t = (article_summary or "").lower()
-    if we == "direct" or cross.get("_wealth_list", {}).get("list_match"):
-        return "verified_wealth"
-    if we == "indirect" and er in ("founder", "ceo", "owner"):
-        return "likely_wealth"
-    if any(k in t for k in ("raised", "series", "funding", "valuation", "billion", "million")) and er in (
-        "founder",
-        "ceo",
-        "owner",
-        "investor",
-    ):
-        return "likely_wealth"
-    if er == "founder" or "founder" in str(cross.get("canonical_role", "")).lower():
-        return "emerging_founder"
-    return "unclear"
+    """Backward-compatible wrapper; prefer :func:`classify_wealth_status` with full candidate."""
+    stub: dict[str, Any] = {
+        "economic_role": economic_role,
+        "role": str(cross.get("canonical_role") or ""),
+        "context_type": "primary",
+    }
+    return classify_wealth_status(article_summary, stub, cross)
 
 
 # =============================================================================
@@ -633,9 +992,11 @@ _BAD_COMPANY_FRAGMENTS = frozenset(
 def compute_match_score(
     candidate: dict[str, Any],
     cross_check_result: dict[str, Any],
+    article_summary: str = "",
 ) -> tuple[int, list[str]]:
     reasons: list[str] = []
     s = 0
+    art = (article_summary or "").lower()
 
     ct = str(candidate.get("context_type") or "mention").lower()
     if ct == "primary":
@@ -644,6 +1005,9 @@ def compute_match_score(
     elif ct == "secondary":
         s += 8
         reasons.append("+8 secondary")
+    elif ct in ("historical", "commentary"):
+        s -= 18
+        reasons.append("-18 historical/commentary context")
     else:
         reasons.append("+0 mention")
 
@@ -660,20 +1024,40 @@ def compute_match_score(
     elif er == "executive":
         s += 4
         reasons.append("+4 executive")
+    elif er == "historical":
+        s -= 14
+        reasons.append("-14 historical role")
     elif er == "commentator":
         s -= 10
         reasons.append("-10 commentator")
     elif er == "lawyer":
         rl = str(candidate.get("role") or "").lower()
-        if any(x in rl for x in ("founder", "owner", "co-founder")):
+        if any(x in rl for x in ("founder", "owner", "co-founder")) or any(
+            x in art for x in ("founded", "co-founder", "owner of")
+        ):
             s += 4
-            reasons.append("+4 lawyer+founder context")
+            reasons.append("+4 lawyer+ownership context")
         else:
             s -= 12
             reasons.append("-12 lawyer")
     elif er == "politician":
-        s -= 12
-        reasons.append("-12 politician")
+        if any(
+            x in art
+            for x in (
+                "founder",
+                "owner",
+                "stake",
+                "business",
+                "company",
+                "invested",
+                "ipo",
+            )
+        ):
+            s -= 4
+            reasons.append("-4 politician+business")
+        else:
+            s -= 12
+            reasons.append("-12 politician")
 
     wr = str(candidate.get("wealth_relevance") or "medium").lower()
     if wr == "high":
@@ -700,8 +1084,8 @@ def compute_match_score(
         s -= 8
         reasons.append("-8 low identity confidence")
     if mismatch and conf < 0.5:
-        s -= 5
-        reasons.append("-5 likely wrong identity")
+        s -= 15
+        reasons.append("-15 likely wrong identity")
 
     co = str(cross_check_result.get("canonical_company") or candidate.get("company") or "").strip()
     col = co.lower()
