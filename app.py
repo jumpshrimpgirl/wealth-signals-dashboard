@@ -1002,11 +1002,10 @@ def render_home_signal_card(row: pd.Series) -> None:
     if _has_top5:
         _ps = _safe_int_from_cell(_tplab, 0)
         _plab = str(row.get("home_priority_label") or row.get("priority_label") or "").strip()
-        _score_note = "Home"
     else:
         _ps = _safe_int_from_cell(row.get("priority_score", row.get("score")), 0)
         _plab = str(row.get("priority_label") or row.get("priority_level") or "").strip()
-        _score_note = "Priority"
+    _score_note = "Confidence"
     with st.container(border=True):
         c1, c2 = st.columns([3, 1])
         with c1:

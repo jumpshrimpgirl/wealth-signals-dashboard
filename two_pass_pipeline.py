@@ -87,8 +87,26 @@ def _normalize_rerank_item(it: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _numeric_wealth_implausible_for_home(row: dict[str, Any]) -> bool:
+    """
+    Legacy or buggy rows can still carry huge $ strings without verification.
+    Home should not reward precision that is almost certainly not personal net worth.
+    """
+    from wealth_display import parse_money_string_to_usd
+
+    ew = str(row.get("est_wealth") or row.get("est_wealth_display") or "")
+    v = parse_money_string_to_usd(ew)
+    if v is None:
+        return False
+    if bool(row.get("wealth_numeric_verified")):
+        return False
+    return v > 100_000_000
+
+
 def _pass2_home_score_cap(row: dict[str, Any]) -> int | None:
     """PASS 2 Home: dead/historical / weak context / non-economic article ceilings."""
+    if _numeric_wealth_implausible_for_home(row):
+        return 28
     if row.get("candidate_historical_dead"):
         return 25
     fw = int(row.get("founder_wealth_score") or 0)
@@ -164,7 +182,9 @@ def rerank_top_candidates_with_ai(candidate_rows: list[dict[str, Any]]) -> list[
             f"[{i}] name={r.get('person_name') or r.get('name')} | role={r.get('role')} | "
             f"company={r.get('company_name') or r.get('company')} | "
             f"signal={r.get('signal_type')} pass1_priority={r.get('priority_score')} | "
-            f"wealth_status={r.get('wealth_status')} | economic_role={r.get('economic_role')} | "
+            f"wealth_status={r.get('wealth_status')} | est_wealth={r.get('est_wealth')} | "
+            f"wealth_numeric_verified={r.get('wealth_numeric_verified')} | "
+            f"economic_role={r.get('economic_role')} | "
             f"context={r.get('context_type')} | identity_conf={r.get('identity_confidence')} | "
             f"article_economic={r.get('article_economic_relevance')} | dead_hist={r.get('candidate_historical_dead')} | "
             f"founder_wealth={r.get('founder_wealth_score')} | ownership={r.get('ownership_inference')} | "
@@ -188,6 +208,9 @@ Score independently (must sum to meaningful 0-100 raw before normalization — u
 
 Rules:
 - **Massive private revenue growth** by a founder/operator should score extremely high on 3–4 even with **no** fundraising, M&A, or Forbes net worth.
+- **Wealth numbers:** If ``est_wealth`` looks like a precise $ figure but ``wealth_numeric_verified`` is false, treat it as **unreliable** (often company revenue, valuation, or deal size misread as personal net worth). Penalize ``likely_wealth_creation`` and ``external_verification_strength`` unless the *story* still clearly supports founder-led wealth creation without trusting the dollar figure.
+- **Role / company sanity:** Penalize when role or company contradicts the summary (e.g., counsel or commentator treated as founder, or company clearly wrong for a well-known operator).
+- **Unknown company:** When ``company`` is Unknown or missing, down-rank unless the person is still clearly the primary founder/CEO operator in the snippet — and prefer rows with a coherent private-company tie when scores are close.
 - Commentary, legal procedurals, donor-list mentions: low scores; usually keep_for_home=false.
 - Stale stories: crush timeliness_now.
 - **Prospect tier (field ``prospect_tier``):** ``tier_a`` = realistic FA outreach targets (actionable, under-covered). ``tier_b`` = globally famous / saturated public figures — **down-rank** them: they likely already have extensive FA coverage; only score high if the *news event* is unusually actionable for outreach. ``tier_c`` = not suitable — set keep_for_home=false.
@@ -322,6 +345,8 @@ def _rerank_fallback_heuristic(candidate_rows: list[dict[str, Any]]) -> list[dic
             keep = False
         if row.get("article_economic_relevance") is False and fw < 22:
             keep = False
+        if _numeric_wealth_implausible_for_home(row):
+            top5 = min(top5, 28)
         reason = "heuristic_fallback_no_openai"
         out.append(
             {

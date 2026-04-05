@@ -18,6 +18,29 @@ from hybrid_pipeline import (
     to_clean_dataframe,
 )
 from two_pass_pipeline import apply_pass2_home_rerank
+from wealth_display import validate_display_wealth
+
+
+def _apply_wealth_display_gate(df: pd.DataFrame) -> pd.DataFrame:
+    """Final wealth sanity before Pass-2 Home rerank and Explore table (idempotent)."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for idx in out.index:
+        row = out.loc[idx]
+        vd = validate_display_wealth(
+            {
+                "est_wealth": row.get("est_wealth"),
+                "est_wealth_display": row.get("est_wealth_display"),
+                "wealth_numeric_verified": row.get("wealth_numeric_verified"),
+            }
+        )
+        disp = str(vd.get("est_wealth_display") or row.get("est_wealth_display") or row.get("est_wealth") or "")
+        out.at[idx, "est_wealth_display"] = disp
+        out.at[idx, "wealth_numeric_verified"] = bool(vd.get("wealth_numeric_verified"))
+        if "est_wealth" in out.columns:
+            out.at[idx, "est_wealth"] = disp
+    return out
 
 
 def process_and_rank_prospects(raw_rows: pd.DataFrame) -> pd.DataFrame:
@@ -31,6 +54,7 @@ def process_and_rank_prospects(raw_rows: pd.DataFrame) -> pd.DataFrame:
 
     processed = process_articles(raw_rows)
     df = pd.DataFrame(processed)
+    df = _apply_wealth_display_gate(df)
     return apply_pass2_home_rerank(df, pool_size=30)
 
 

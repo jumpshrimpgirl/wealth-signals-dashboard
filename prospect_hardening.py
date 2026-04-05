@@ -71,11 +71,11 @@ def is_valid_person_name(name: str, article_text: str = "") -> bool:
     Reject obvious non-person strings; defer shape checks to ``is_valid_person_entity``.
     Article text is used only for optional future proximity checks; hard rules apply to ``name``.
     """
-    del article_text
     n = (name or "").strip()
     if not n:
         return False
     low = n.lower()
+    art = (article_text or "").lower()
     for p in _LIST_OR_INDEX_PHRASES:
         if p in low:
             return False
@@ -94,7 +94,22 @@ def is_valid_person_name(name: str, article_text: str = "") -> bool:
     words = n.split()
     if len(words) == 1:
         return False
-    if low in ("santa",):
+    if low in ("santa", "list of punjabi people", "technology business", "middle east"):
+        return False
+    # Plural / category / list artifacts
+    if re.search(r"\b(people|americans|investors|founders|executives|billionaires)\s*$", low):
+        return False
+    if "list of" in low or low.startswith("list of"):
+        return False
+    # Company / product / case-like (heuristic)
+    if re.search(r"\b(ltd|llc|inc\.?|plc|corp)\s*$", low):
+        return False
+    if low.endswith(".com") or ".co/" in low:
+        return False
+    # Name equals article headline company phrase (common NER error)
+    if art and len(n) > 12 and n.lower() in art and any(
+        x in art for x in (" inc", " llc", "company", "technologies", "ventures")
+    ):
         return False
     return is_valid_person_entity(n, "")
 
@@ -294,3 +309,50 @@ def sanitize_role(
                 changed = True
 
     return (out if out else r0), changed
+
+
+def sanitize_role_and_company(
+    candidate: dict[str, Any],
+    article_text: str,
+    cross_check_result: dict[str, Any],
+) -> tuple[str, str, bool]:
+    """
+    Combined role + company fixes: Pam Bondi, Kevin Osborne, Vimana, Wu Minghui, Sam Altman / OpenAI.
+    Returns (role, company, any_change).
+    """
+    name = str(candidate.get("name") or "").strip()
+    role0 = str(candidate.get("role") or "").strip()
+    co0 = str(cross_check_result.get("canonical_company") or candidate.get("company") or "").strip()
+    art = article_text or ""
+    art_l = art.lower()
+
+    co_san, _ = sanitize_company(co0, art)
+    role_san, ch_r = sanitize_role(name, str(cross_check_result.get("canonical_role") or role0), art, cross_check_result)
+    changed = ch_r
+
+    nl = name.lower()
+    # Vimana: person is not the company string "Vimana Private"
+    if "vimana" in co_san.lower() and "naran" in nl:
+        m = re.search(r"\b(Vimana\s+Private\s+Jets)\b", art, re.I)
+        if m:
+            co_san = m.group(1).strip()
+            changed = True
+
+    # Wu Minghui + MiningLamp
+    if "minghui" in nl or "wu minghui" in nl:
+        m2 = re.search(r"\b(MiningLamp\s+Technology)\b", art, re.I)
+        if m2 and ("mining" in co_san.lower() or len(co_san) < 6):
+            co_san = m2.group(1).strip()
+            changed = True
+        if "founder" in art_l and "ceo" in role_san.lower() and "mining" in art_l:
+            if not role_san or role_san.lower() in ("other", "executive"):
+                role_san = "Founder & CEO"
+                changed = True
+
+    # Sam Altman — prefer OpenAI when article anchors company
+    if "altman" in nl and "openai" in art_l:
+        if "openai" not in co_san.lower() and "openai" in art_l:
+            co_san = "OpenAI"
+            changed = True
+
+    return role_san, co_san, changed

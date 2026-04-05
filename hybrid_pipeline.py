@@ -661,10 +661,10 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     from prospect_hardening import (
         is_historical_or_dead,
         is_valid_person_name,
-        sanitize_company,
-        sanitize_role,
+        sanitize_role_and_company,
     )
     from prospect_tier import apply_tier_priority_adjustment, classify_prospect_tier
+    from wealth_display import estimate_wealth_safely, validate_display_wealth
     from settings import SHOW_DEBUG
     from two_pass_pipeline import compute_recency_score, pass1_recency_adjustment
 
@@ -738,8 +738,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             economic_role=eco_r,
         )
 
-        co_san, _co_bad = sanitize_company(str(cc.get("canonical_company") or co_a), summary)
-        role_san, _ = sanitize_role(name, str(cc.get("canonical_role") or role_a), summary, cc)
+        role_san, co_san, _ = sanitize_role_and_company(c, summary, cc)
         cc = {**cc, "canonical_company": co_san, "canonical_role": role_san}
 
         fwc = score_founder_wealth_creation(summary, c, cc)
@@ -766,7 +765,22 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             prio = min(prio, 74)
         prio = max(0, min(100, prio))
 
-        wstat = classify_wealth_status(summary, c, cc)
+        wstat_pre = classify_wealth_status(summary, c, cc)
+        safe_w = estimate_wealth_safely(c, summary, cc, wealth_status_hint=wstat_pre)
+        wstat = str(safe_w.get("wealth_status") or wstat_pre)
+        est = str(safe_w.get("est_wealth") or "Data pending")
+        wealth_confidence = int(safe_w.get("wealth_confidence") or 0)
+        wealth_numeric_verified = bool(safe_w.get("wealth_numeric_verified"))
+        vd = validate_display_wealth(
+            {
+                "est_wealth": est,
+                "est_wealth_display": est,
+                "wealth_numeric_verified": wealth_numeric_verified,
+            }
+        )
+        est_display = str(vd.get("est_wealth_display") or est)
+        wealth_numeric_verified = bool(vd.get("wealth_numeric_verified"))
+
         prospect_tier = classify_prospect_tier(
             c,
             {
@@ -789,10 +803,6 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         if int(fwc.get("subscore") or 0) >= 12 or founder_wealth_score >= 18:
             row_signal_type = "Founder Wealth Creation"
 
-        est = str(cc.get("est_wealth") or "").strip()
-        if not est:
-            est = estimate_wealth_from_context(summary, cc.get("canonical_role") or role_a)
-
         core = build_processed_row_core(
             name=str(cc.get("canonical_name") or name).strip(),
             role=str(cc.get("canonical_role") or role_a).strip(),
@@ -801,7 +811,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             signal_score=int(sig.get("signal_score") or 0),
             match_score=msc,
             priority_label=label,
-            est_wealth=est,
+            est_wealth=est_display,
             source_title=source_title,
             source_url=source_url,
             summary=summary,
@@ -829,7 +839,9 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             "raw_title": source_title,
             "score": core["priority_score"],
             "priority_level": core["priority_label"],
-            "est_wealth_display": core["est_wealth"],
+            "est_wealth_display": est_display,
+            "wealth_confidence": wealth_confidence,
+            "wealth_numeric_verified": wealth_numeric_verified,
             "signal_type": core["signal_type"],
             "source_title": source_title,
             "source_url": source_url,
@@ -912,6 +924,8 @@ def to_clean_dataframe(processed: list[dict[str, Any]]) -> pd.DataFrame:
         "priority_label",
         "est_wealth",
         "wealth_status",
+        "wealth_confidence",
+        "wealth_numeric_verified",
         "published_at",
         "source_title",
         "source_url",
