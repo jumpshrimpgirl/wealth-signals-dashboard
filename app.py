@@ -8,27 +8,135 @@ Run: streamlit run app.py
 
 import html
 import json
+import logging
 import os
 from datetime import date, datetime, timezone
+from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from data import fetch_signals, format_wealth
 from person_validation import is_valid_person
 from prospect_processor import process_and_rank_prospects
-from slack_alerts import send_slack_alert
+from settings import SLACK_WEBHOOK_URL
+
+_log = logging.getLogger(__name__)
+
+
+# -----------------------------------------------------------------------------
+# Slack (webhook notifications)
+# -----------------------------------------------------------------------------
+def post_to_slack(message: str) -> tuple[bool, str]:
+    """
+    POST ``{"text": message}`` to the incoming webhook.
+    Returns (success, detail) where success is True only for HTTP 200.
+    """
+    wh = SLACK_WEBHOOK_URL
+    if not wh or not str(wh).strip():
+        return False, "Missing webhook"
+    try:
+        r = requests.post(str(wh).strip(), json={"text": message}, timeout=20)
+        body = (r.text or "")[:4000]
+        ok = r.status_code == 200
+        if ok:
+            return True, f"HTTP {r.status_code}"
+        return False, f"HTTP {r.status_code}: {body}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _slack_priority_score(row: dict[str, Any]) -> int:
+    """Use ``priority_score`` only (processed pipeline)."""
+    try:
+        v = row.get("priority_score")
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return 0
+        return int(float(pd.to_numeric(v, errors="coerce") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def send_slack_alert(processed_rows: list[dict[str, Any]] | pd.DataFrame | None) -> None:
+    """
+    Notify Slack for top prospects (``priority_score`` >= 75), max 5, sorted descending.
+    Call only with the final processed dataframe from ``process_and_rank_prospects``.
+    """
+    webhook_configured = bool(SLACK_WEBHOOK_URL and str(SLACK_WEBHOOK_URL).strip())
+    _log.info("[Slack] webhook present: %s", webhook_configured)
+    print(f"[Slack] webhook present: {webhook_configured}")
+
+    if processed_rows is None:
+        rows: list[dict[str, Any]] = []
+    elif isinstance(processed_rows, pd.DataFrame):
+        rows = processed_rows.to_dict("records")
+    else:
+        rows = list(processed_rows)
+
+    n_total = len(rows)
+    qualified = [r for r in rows if _slack_priority_score(r) >= 75]
+    n_ge_75 = len(qualified)
+    _log.info("[Slack] processed_rows=%s, priority_score>=75: %s", n_total, n_ge_75)
+    print(f"[Slack] processed_rows={n_total}, priority_score>=75: {n_ge_75}")
+
+    qualified.sort(key=_slack_priority_score, reverse=True)
+    top5 = qualified[:5]
+    top3_preview = [
+        (
+            str(r.get("name") or r.get("person_name") or "").strip() or "—",
+            _slack_priority_score(r),
+        )
+        for r in qualified[:3]
+    ]
+
+    debug_payload: dict[str, Any] = {
+        "webhook_configured": webhook_configured,
+        "total_rows": n_total,
+        "rows_ge_75": n_ge_75,
+        "top3_names_scores": top3_preview,
+        "last_post_ok": None,
+        "last_post_detail": "",
+    }
+
+    if not top5:
+        _log.info("[Slack] no rows with priority_score >= 75; skipping send")
+        print("[Slack] no rows with priority_score >= 75; skipping send")
+        debug_payload["last_post_detail"] = "No qualifying rows (priority_score < 75)"
+        st.session_state["_slack_debug"] = debug_payload
+        return
+
+    lines = ["🔥 Wealth Signals Alert", ""]
+    for p in top5:
+        name = str(p.get("name") or p.get("person_name") or "Unknown").strip()
+        role = str(p.get("role") or "—").strip()
+        company = str(p.get("company") or p.get("company_name") or "—").strip()
+        ps = _slack_priority_score(p)
+        wealth = str(p.get("est_wealth") or p.get("est_wealth_display") or "—").strip()
+        sig = str(p.get("signal_type") or "—").strip()
+        lines.append(f"• {name}")
+        lines.append(f"{role} @ {company}")
+        lines.append(f"Score: {ps}")
+        lines.append(f"Wealth: {wealth}")
+        lines.append(f"Signal: {sig}")
+        lines.append("")
+
+    message = "\n".join(lines).strip()
+    ok, detail = post_to_slack(message)
+    debug_payload["last_post_ok"] = ok
+    debug_payload["last_post_detail"] = detail
+    st.session_state["_slack_debug"] = debug_payload
+
+    _log.info("[Slack] post_to_slack ok=%s detail=%s", ok, detail)
+    print(f"[Slack] post_to_slack ok={ok} detail={detail}")
 
 
 def _load_signals_df() -> pd.DataFrame:
     """Load signals, then rank by match × signal quality (``process_and_rank_prospects``)."""
     df = fetch_signals()
     df = process_and_rank_prospects(df)
-    try:
-        send_slack_alert(df.to_dict("records"))
-    except Exception:
-        pass
+    send_slack_alert(df)
     return df
 
 # How long a signal counts as "NEW" in the feed (hours)
@@ -1126,6 +1234,60 @@ with st.container(border=True, key="ws_hero_bar"):
             f"""<span>|</span><em>{html.escape(human_time_ago(lu))}</em></div>""",
             unsafe_allow_html=True,
         )
+
+# --- Slack alert debug (temporary visible diagnostics) ---
+_ps_col = signals_df.get("priority_score")
+if _ps_col is not None and len(_ps_col) > 0:
+    _ps_num = pd.to_numeric(_ps_col, errors="coerce").fillna(0)
+    _slack_n_tot = len(signals_df)
+    _slack_n_75 = int((_ps_num >= 75).sum())
+else:
+    _slack_n_tot = len(signals_df)
+    _slack_n_75 = 0
+
+with st.expander("Slack notifications (debug)", expanded=True):
+    st.caption("Source: processed `signals_df` after ranking. Threshold for alerts: **priority_score ≥ 75**.")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Total processed rows", _slack_n_tot)
+    with c2:
+        st.metric("Rows with priority_score ≥ 75", _slack_n_75)
+    _sd = st.session_state.get("_slack_debug", {})
+    if _sd:
+        st.caption(
+            f"Webhook in env: **{_sd.get('webhook_configured')}** · "
+            f"Last POST ok: **{_sd.get('last_post_ok')}** · {_sd.get('last_post_detail', '')}"
+        )
+    _top3 = _sd.get("top3_names_scores") if _sd else None
+    if _top3:
+        st.markdown("**Top 3 names + scores (alert candidates)**")
+        for _nm, _sc in _top3:
+            st.write(f"- {_nm}: **{_sc}**")
+    elif _slack_n_75 == 0:
+        st.caption("No rows meet the Slack threshold.")
+
+# -----------------------------------------------------------------------------
+# Sidebar: Slack status + test (integrations)
+# -----------------------------------------------------------------------------
+if SLACK_WEBHOOK_URL and str(SLACK_WEBHOOK_URL).strip():
+    st.sidebar.markdown("**Slack:** configured")
+else:
+    st.sidebar.markdown("**Slack:** missing webhook")
+
+if st.sidebar.button("Send Slack Test", key="slack_send_test_btn", use_container_width=True):
+    _ok, _detail = post_to_slack("🚀 TEST: Slack is connected")
+    st.session_state["_slack_test_last"] = (_ok, _detail)
+    _log.info("[Slack test] ok=%s detail=%s", _ok, _detail)
+    print(f"[Slack test] ok={_ok} detail={_detail}")
+
+if "_slack_test_last" in st.session_state:
+    _tok, _tmsg = st.session_state["_slack_test_last"]
+    if _tok:
+        st.sidebar.success(f"Slack test: {_tmsg}")
+    else:
+        st.sidebar.error(f"Slack test failed: {_tmsg}")
+
+st.sidebar.divider()
 
 # -----------------------------------------------------------------------------
 # Sidebar: same prospect schema as the table & Details (wealth-focused, not generic news)
