@@ -650,6 +650,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         compute_match_score,
         cross_check_identity_and_wealth,
         extract_candidates_with_ai_cached,
+        heuristic_candidates_from_row,
         infer_ownership_strength,
         priority_label_from_priority_score,
         score_article_signal,
