@@ -79,6 +79,69 @@ def outreach_angle_for_event_type(event_type: str) -> str:
     return angles.get(et, "Acknowledge the news — offer relevant planning context.")
 
 
+def generate_outreach_angle(row) -> str:
+    """
+    Generate context-aware outreach angle based on available fields.
+    Varies by event_type and uses person, company, role when available.
+    """
+    et = (row["event_type"] or "").strip()
+    person = (row["person_name"] or "").strip()
+    company = (row["company_name"] or "").strip()
+    role = (row["role"] or "").strip()
+
+    has_person = bool(person)
+    has_company = bool(company) and company != "Unknown"
+    has_role = bool(role)
+
+    if et == "Founder Exit":
+        if has_person and has_company and has_role:
+            return f"Discuss liquidity options with {person}, {role} at {company}, following their recent exit."
+        elif has_person and has_company:
+            return f"Reach out to {person} from {company} about post-exit financial planning."
+        elif has_company:
+            return f"Explore tax strategies for {company}'s recent acquisition or exit."
+        else:
+            return "Discuss founder exit opportunities and wealth management."
+
+    elif et == "Funding":
+        if has_person and has_company and has_role:
+            return f"Connect with {person}, {role} at {company}, on their funding success and future growth."
+        elif has_person and has_company:
+            return f"Congratulate {person} from {company} on the raise and discuss equity planning."
+        elif has_company:
+            return f"Discuss funding implications for {company}'s valuation and team equity."
+        else:
+            return "Explore startup funding strategies and liquidity events."
+
+    elif et == "Promotion":
+        if has_person and has_company and has_role:
+            return f"Reach out to {person} on their {role} promotion at {company}."
+        elif has_person and has_company:
+            return f"Congratulate {person} from {company} on their career advancement."
+        elif has_company:
+            return f"Discuss compensation changes following promotions at {company}."
+        else:
+            return "Talk about career progression and executive compensation."
+
+    elif et == "Board Appointment":
+        if has_person and has_company and has_role:
+            return f"Connect with {person} on their {role} appointment to {company}'s board."
+        elif has_person and has_company:
+            return f"Discuss board opportunities with {person} joining {company}."
+        elif has_company:
+            return f"Explore board compensation and governance at {company}."
+        else:
+            return "Discuss board roles and director compensation."
+
+    else:  # Other or unknown
+        if has_person and has_company:
+            return f"Follow up with {person} from {company} on recent developments."
+        elif has_company:
+            return f"Discuss market updates related to {company}."
+        else:
+            return "Acknowledge the news — offer relevant planning context."
+
+
 def priority_level_from_score(score: Any) -> str:
     """
     High / Medium / Low from numeric score (same bands as the product spec).
@@ -169,7 +232,7 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     out["score"] = out["event_type"].apply(lambda et: score_for_event_type(str(et)))
 
     # --- Action layer: who to prioritize and what to say (derived from score + event_type) ---
-    out["outreach_angle"] = out["event_type"].apply(outreach_angle_for_event_type)
+    out["outreach_angle"] = out.apply(generate_outreach_angle, axis=1)
     out["priority_level"] = out["score"].apply(priority_level_from_score)
     out["suggested_next_step"] = out["priority_level"].apply(suggested_next_step_from_priority)
 

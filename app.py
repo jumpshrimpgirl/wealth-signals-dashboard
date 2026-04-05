@@ -32,7 +32,7 @@ def inject_styles() -> None:
     max-width: 1120px !important;
     padding-left: 2rem !important;
     padding-right: 2rem !important;
-    padding-bottom: 2rem !important;
+    padding-bottom: 1rem !important;
   }
 
   /* Sidebar */
@@ -43,6 +43,9 @@ def inject_styles() -> None:
   section[data-testid="stSidebar"] .block-container {
     padding-top: 1.5rem !important;
   }
+  section[data-testid="stSidebar"] .stSelectbox, section[data-testid="stSidebar"] .stMultiselect, section[data-testid="stSidebar"] .stSlider, section[data-testid="stSidebar"] .stTextInput, section[data-testid="stSidebar"] .stCheckbox {
+    margin-bottom: 1rem !important;
+  }
 
   /* Hero / title area */
   .ws-hero-title {
@@ -50,14 +53,14 @@ def inject_styles() -> None:
     font-weight: 600;
     letter-spacing: -0.035em;
     color: #000;
-    margin: 0 0 0.35rem 0;
+    margin: 0 0 0.25rem 0;
     line-height: 1.2;
   }
   .ws-hero-sub {
     font-size: 0.95rem;
-    color: #475569;
+    color: #374151;
     margin: 0 0 0.5rem 0;
-    line-height: 1.45;
+    line-height: 1.4;
     max-width: 52rem;
   }
   .ws-last-updated {
@@ -70,7 +73,7 @@ def inject_styles() -> None:
     border: 1px solid #d1d5db;
     border-radius: 999px;
     padding: 0.35rem 0.85rem;
-    margin-top: 0.35rem;
+    margin-top: 0.25rem;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
   }
   .ws-last-updated strong {
@@ -84,28 +87,28 @@ def inject_styles() -> None:
 
   /* Section headers */
   .ws-section-head {
-    margin: 1rem 0 0.5rem 0;
+    margin: 0.75rem 0 0.25rem 0;
   }
-  .ws-section-head:first-of-type { margin-top: 0.5rem; }
+  .ws-section-head:first-of-type { margin-top: 0.25rem; }
   .ws-h2 {
     font-size: 1.125rem;
     font-weight: 600;
     letter-spacing: -0.02em;
     color: #000;
-    margin: 0 0 0.35rem 0;
+    margin: 0 0 0.15rem 0;
   }
   .ws-section-sub {
     font-size: 0.875rem;
-    color: #475569;
+    color: #374151;
     margin: 0;
-    line-height: 1.5;
+    line-height: 1.4;
   }
 
   .ws-rule {
     border: none;
     height: 1px;
     background: linear-gradient(90deg, transparent, #d1d5db 15%, #d1d5db 85%, transparent);
-    margin: 1.5rem 0;
+    margin: 1rem 0;
   }
 
   /* Metric tiles */
@@ -113,7 +116,7 @@ def inject_styles() -> None:
     background: #ffffff !important;
     border: 1px solid #d1d5db !important;
     border-radius: 12px !important;
-    padding: 1.1rem 1.25rem !important;
+    padding: 1rem 1.25rem !important;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
   }
   [data-testid="stMetric"] label {
@@ -132,10 +135,10 @@ def inject_styles() -> None:
   [data-testid="stVerticalBlockBorderWrapper"] {
     background: #ffffff !important;
     border: 1px solid #d1d5db !important;
-    border-radius: 14px !important;
+    border-radius: 12px !important;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
-    padding: 1.5rem 1.75rem !important;
-    margin-bottom: 0.75rem !important;
+    padding: 1.25rem 1.5rem !important;
+    margin-bottom: 0.5rem !important;
   }
 
   /* Primary button */
@@ -164,13 +167,16 @@ def inject_styles() -> None:
   [data-testid="stExpander"] {
     border: 1px solid #d1d5db !important;
     border-radius: 12px !important;
-    margin-bottom: 0.5rem !important;
+    margin-bottom: 0.25rem !important;
     background: #fff !important;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
   }
   [data-testid="stExpander"] summary {
     font-weight: 500 !important;
     color: #000 !important;
+  }
+  [data-testid="stExpander"] .stMarkdown p {
+    margin: 0.25rem 0 !important;
   }
 
   /* Info / caption polish */
@@ -254,11 +260,15 @@ def inject_styles() -> None:
     text-decoration: none !important;
     border-bottom: 1px solid #9ca3af;
   }
-  .ws-link a:hover { border-bottom-color: #000; }
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
+  .ws-details-panel {
+    height: 600px;
+    overflow-y: auto;
+    border: 1px solid #d1d5db;
+    border-radius: 12px;
+    padding: 1rem;
+    background: #fff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
 
 
 def human_time_ago(ts) -> str:
@@ -532,12 +542,13 @@ if len(signals_df) == 0:
     top_high = signals_df.iloc[:0]
 else:
     high_only = signals_df[signals_df["priority_level"] == "High"]
-    # Filter for high quality: quality_score >= 2, exclude low-confidence "Other", avoid missing person + weak company
-    high_only = high_only[high_only["quality_score"] >= 2]
-    high_only = high_only[~((high_only["event_type"] == "Other") & (high_only["quality_score"] < 3))]
+    # Filter for high quality: quality_score >= 3, exclude low-confidence "Other", avoid missing person + weak company
+    high_only = high_only[high_only["quality_score"] >= 3]
+    high_only = high_only[~((high_only["event_type"] == "Other") & (high_only["quality_score"] < 4))]
     high_only = high_only[~((high_only["person_name"] == "") & (high_only["company_name"] == "Unknown"))]
-    # Sort by quality first, then score
-    top_high = high_only.sort_values(["quality_score", "score"], ascending=[False, False]).head(5)
+    # Prioritize core event types, then quality, then score
+    high_only["event_type"] = pd.Categorical(high_only["event_type"], categories=["Founder Exit", "Funding", "Promotion", "Board Appointment", "Other"], ordered=True)
+    top_high = high_only.sort_values(["event_type", "quality_score", "score"], ascending=[False, False, False]).head(5)
 
 if len(signals_df) > 0 and len(top_high) == 0:
     st.info("No **High** priority signals right now (score ≥ 85). Lower the minimum score filter below or check back after refresh.")
@@ -619,18 +630,20 @@ else:
     in_week = signals_df.loc[dated & (signals_df["event_date"] >= week_ago)]
     if len(in_week) > 0:
         # Filter for quality
-        in_week = in_week[in_week["quality_score"] >= 2]
-        in_week = in_week[~((in_week["event_type"] == "Other") & (in_week["quality_score"] < 3))]
+        in_week = in_week[in_week["quality_score"] >= 3]
+        in_week = in_week[~((in_week["event_type"] == "Other") & (in_week["quality_score"] < 4))]
         in_week = in_week[~((in_week["person_name"] == "") & (in_week["company_name"] == "Unknown"))]
-        top_week = in_week.sort_values(["quality_score", "score"], ascending=[False, False]).head(5)
+        in_week["event_type"] = pd.Categorical(in_week["event_type"], categories=["Founder Exit", "Funding", "Promotion", "Board Appointment", "Other"], ordered=True)
+        top_week = in_week.sort_values(["event_type", "quality_score", "score"], ascending=[False, False, False]).head(5)
         used_week_fallback = False
     else:
         # Fallback to overall top, with quality filters
         overall = signals_df.copy()
-        overall = overall[overall["quality_score"] >= 2]
-        overall = overall[~((overall["event_type"] == "Other") & (overall["quality_score"] < 3))]
+        overall = overall[overall["quality_score"] >= 3]
+        overall = overall[~((overall["event_type"] == "Other") & (overall["quality_score"] < 4))]
         overall = overall[~((overall["person_name"] == "") & (overall["company_name"] == "Unknown"))]
-        top_week = overall.sort_values(["quality_score", "score"], ascending=[False, False]).head(5)
+        overall["event_type"] = pd.Categorical(overall["event_type"], categories=["Founder Exit", "Funding", "Promotion", "Board Appointment", "Other"], ordered=True)
+        top_week = overall.sort_values(["event_type", "quality_score", "score"], ascending=[False, False, False]).head(5)
         used_week_fallback = True
 
 if used_week_fallback and n_total > 0:
@@ -744,14 +757,52 @@ else:
 st.markdown(
     """
 <div class="ws-section-head">
-  <h2 class="ws-h2">Details</h2>
-  <p class="ws-section-sub">Expand a row for actions, full story, and source link.</p>
+  <h2 class="ws-h2">Details Explorer</h2>
+  <p class="ws-section-sub">Search and filter the full list — expand rows for deep dives.</p>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-for _, row in filtered.iterrows():
+# Details filters
+col1, col2 = st.columns([2, 1])
+with col1:
+    details_search = st.text_input(
+        "Search details",
+        placeholder="Person, company, title, or role…",
+        key="details_search",
+        label_visibility="collapsed"
+    )
+with col2:
+    priority_filter = st.selectbox(
+        "Filter by priority",
+        ["All", "High", "Medium", "Low"],
+        key="details_priority",
+        label_visibility="collapsed"
+    )
+
+# Apply details filters
+details_filtered = filtered.copy()
+if details_search.strip():
+    search_lower = details_search.strip().lower()
+    pn = details_filtered["person_name"].fillna("").str.lower()
+    cn = details_filtered["company_name"].fillna("").str.lower()
+    rt = details_filtered["raw_title"].fillna("").str.lower()
+    rl = details_filtered["role"].fillna("").str.lower()
+    mask = (
+        pn.str.contains(search_lower, na=False, regex=False)
+        | cn.str.contains(search_lower, na=False, regex=False)
+        | rt.str.contains(search_lower, na=False, regex=False)
+        | rl.str.contains(search_lower, na=False, regex=False)
+    )
+    details_filtered = details_filtered[mask]
+
+if priority_filter != "All":
+    details_filtered = details_filtered[details_filtered["priority_level"] == priority_filter]
+
+st.markdown('<div class="ws-details-panel">', unsafe_allow_html=True)
+
+for _, row in details_filtered.iterrows():
     person = row["person_name"] or "—"
     company = row["company_name"] or "Unknown"
     new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
@@ -784,3 +835,5 @@ for _, row in filtered.iterrows():
         st.write(row["full_explanation"] or "—")
         st.markdown("**Source**")
         st.markdown(f"[Open public source]({row['source_url']})")
+
+st.markdown('</div>', unsafe_allow_html=True)
