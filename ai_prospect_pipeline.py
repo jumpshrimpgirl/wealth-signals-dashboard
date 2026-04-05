@@ -582,6 +582,9 @@ def _openai_extract_candidates(article_text: str, source_title: str) -> dict[str
     title = (source_title or "")[:500]
     prompt = f"""You extract structured data from a news article for wealth / business development intelligence.
 
+The input may include labeled sections: TITLE, SUMMARY, FIRST_PARAGRAPHS, ARTICLE, and MONEY_MENTIONS.
+Use the full ARTICLE and FIRST_PARAGRAPHS for facts. MONEY_MENTIONS are contextual (deals/revenue) — not personal net worth.
+
 Article title: {title}
 
 Article body:
@@ -655,6 +658,45 @@ Return strict JSON only (schema enforced)."""
 def extract_candidates_with_ai(article_text: str, source_title: str) -> dict[str, Any] | None:
     """Structured candidates + article_topic. None if API missing or failure."""
     return _openai_extract_candidates(article_text, source_title)
+
+
+def _blended_article_for_ai(normalized_article: dict[str, Any]) -> str:
+    """Blend metadata + body for the LLM (not og:title alone)."""
+    na = normalized_article or {}
+    chunks: list[str] = []
+    t = str(na.get("title") or "").strip()
+    if t:
+        chunks.append(f"TITLE: {t}")
+    s = str(na.get("summary") or "").strip()
+    if s:
+        chunks.append(f"SUMMARY: {s}")
+    fp = str(na.get("first_paragraphs") or "").strip()
+    if fp:
+        chunks.append(f"FIRST_PARAGRAPHS:\n{fp}")
+    body = str(na.get("article_text") or "").strip()
+    if body:
+        chunks.append(f"ARTICLE:\n{body}")
+    mm = na.get("money_mentions") or []
+    if isinstance(mm, list) and mm:
+        chunks.append(
+            "MONEY_MENTIONS (deal/company context — not personal net worth): "
+            + ", ".join(str(x) for x in mm[:25])
+        )
+    return "\n\n".join(chunks)[:28000]
+
+
+def extract_prospect_candidates(normalized_article: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Main prospect extractor: structured AI over a **normalized** article (parse layer output).
+    """
+    text = _blended_article_for_ai(normalized_article)
+    title = str(normalized_article.get("title") or normalized_article.get("og_title") or "").strip()
+    url = str(
+        normalized_article.get("canonical_url") or normalized_article.get("url") or ""
+    ).strip()
+    if not text.strip():
+        return None
+    return extract_candidates_with_ai_cached(text, title, source_url=url)
 
 
 def _cache_key_article(source_url: str, source_title: str) -> str:

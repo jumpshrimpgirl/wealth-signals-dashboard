@@ -19,6 +19,7 @@ import feedparser
 import pandas as pd
 import requests
 
+from article_parser import parse_article_source
 from ai_extraction import extract_signal_with_ai
 from ai_decision import enrich_dataframe_with_ai_decision
 from fa_gating import compute_fa_gating_row
@@ -3728,9 +3729,16 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         seen_urls.add(link)
 
         summary = _strip_html(getattr(entry, "summary", None) or getattr(entry, "description", None) or "")
-        base_summary = summary or f"(No summary in feed.) Headline: {title}"
 
-        article_paragraphs = fetch_article_paragraph_text(link)
+        na = parse_article_source(
+            {
+                "url": link,
+                "feed_title": title,
+                "feed_summary": summary,
+            }
+        )
+        article_paragraphs = str(na.get("article_text") or "").strip() or fetch_article_paragraph_text(link)
+        base_summary = str(na.get("summary") or "").strip() or summary or f"(No summary in feed.) Headline: {title}"
         body_snip = (article_paragraphs or "").strip()[:3000]
         full_explanation = base_summary
         if body_snip:
@@ -3744,6 +3752,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
 
         entry_date_s = _parse_entry_date(entry)
         detected_now = datetime.now(timezone.utc)
+        published_row = str(na.get("published_at") or "").strip() or entry_date_s
 
         # Prospect identification engine (multi-person, validated, 0–100 score) when enabled
         if _wealth_engine.ingest_via_prospect_engine():
@@ -3753,7 +3762,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                 article_paragraphs=article_paragraphs or "",
                 full_explanation=full_explanation,
                 link=link,
-                entry_date_iso=entry_date_s,
+                entry_date_iso=published_row,
                 detected_at=detected_now,
             )
             if eng_rows:
@@ -3794,10 +3803,11 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                 "event_type": event_type,
                 "raw_title": title,
                 "role": role,
-                "event_date": entry_date_s,
+                "event_date": published_row,
                 "detected_at": detected_now,
                 "why_it_matters": why,
                 "source_url": link,
+                "normalized_article": na,
                 "full_explanation": full_explanation[:4000],
                 "quality_score": 0,
                 "confidence_score": 0,

@@ -655,7 +655,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         classify_wealth_status,
         compute_match_score,
         cross_check_identity_and_wealth,
-        extract_candidates_with_ai_cached,
+        extract_prospect_candidates,
         heuristic_candidates_from_row,
         infer_ownership_strength,
         priority_label_from_priority_score,
@@ -664,11 +664,10 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         score_private_company_context,
         select_primary_actor,
     )
+    from article_parser import minimal_normalized_from_row
     from prospect_display_gates import (
         is_commentary_only,
-        is_forbidden_display_name,
         normalize_extracted_candidate,
-        sanitize_signal_type,
     )
     from prospect_hardening import (
         coerce_display_person_name,
@@ -676,15 +675,27 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         is_valid_person_name,
         sanitize_role_and_company,
     )
+    from prospect_resolution import (
+        derive_wealth_fields,
+        infer_signal_type,
+        is_invalid_candidate_name,
+        resolve_person_company,
+    )
     from prospect_tier import apply_tier_priority_adjustment, classify_prospect_tier
-    from wealth_display import estimate_wealth_safely, validate_display_wealth
     from settings import SHOW_DEBUG
     from two_pass_pipeline import compute_recency_score, pass1_recency_adjustment
 
-    summary = _text_blob(row)
-    source_title = str(row.get("raw_title") or row.get("source_title") or "").strip()
-    source_url = str(row.get("source_url") or "").strip()
-    published_at = row.get("detected_at") or row.get("event_date")
+    na_in = row.get("normalized_article")
+    na: dict[str, Any] = dict(na_in) if isinstance(na_in, dict) else minimal_normalized_from_row(row)
+    primary_text = "\n\n".join(
+        str(p).strip()
+        for p in (na.get("title"), na.get("summary"), na.get("article_text"))
+        if p and str(p).strip()
+    ).strip() or _text_blob(row)
+    summary = primary_text
+    source_title = str(na.get("title") or row.get("raw_title") or row.get("source_title") or "").strip()
+    source_url = str(na.get("canonical_url") or row.get("source_url") or "").strip()
+    published_at = na.get("published_at") or row.get("detected_at") or row.get("event_date")
     recency = _recency_ts(row)
 
     sig = score_article_signal(summary, source_title, published_at)
@@ -695,9 +706,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
 
     ai_payload: dict[str, Any] | None = None
     if gate:
-        ai_payload = extract_candidates_with_ai_cached(
-            summary, source_title, source_url=source_url
-        )
+        ai_payload = extract_prospect_candidates(na)
     if not ai_payload or not ai_payload.get("candidates"):
         ai_payload = heuristic_candidates_from_row(row, summary)
 
@@ -734,7 +743,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         name = str(c.get("name") or "").strip()
         if not name:
             continue
-        if is_forbidden_display_name(name, summary):
+        if is_invalid_candidate_name(name, str(c.get("entity_type") or ""), summary):
             continue
         if not is_valid_person_name(name, summary):
             continue
@@ -762,6 +771,10 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             context_type=ctx_t,
             economic_role=eco_r,
         )
+
+        rpc_role, rpc_co, rpc_hit = resolve_person_company(c, na, cc)
+        if rpc_hit:
+            cc = {**cc, "canonical_company": rpc_co, "canonical_role": rpc_role}
 
         role_san, co_san, _ = sanitize_role_and_company(c, summary, cc)
         cc = {**cc, "canonical_company": co_san, "canonical_role": role_san}
@@ -796,20 +809,11 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         prio = max(0, min(100, prio))
 
         wstat_pre = classify_wealth_status(summary, c, cc)
-        safe_w = estimate_wealth_safely(c, summary, cc, wealth_status_hint=wstat_pre)
-        wstat = str(safe_w.get("wealth_status") or wstat_pre)
-        est = str(safe_w.get("est_wealth") or "Data pending")
-        wealth_confidence = int(safe_w.get("wealth_confidence") or 0)
-        wealth_numeric_verified = bool(safe_w.get("wealth_numeric_verified"))
-        vd = validate_display_wealth(
-            {
-                "est_wealth": est,
-                "est_wealth_display": est,
-                "wealth_numeric_verified": wealth_numeric_verified,
-            }
-        )
-        est_display = str(vd.get("est_wealth_display") or est)
-        wealth_numeric_verified = bool(vd.get("wealth_numeric_verified"))
+        dw = derive_wealth_fields(c, na, cc, wealth_status_hint=wstat_pre)
+        wstat = str(dw.get("wealth_status") or wstat_pre)
+        est_display = str(dw.get("est_wealth") or "Data pending")
+        wealth_confidence = int(dw.get("wealth_confidence") or 0)
+        wealth_numeric_verified = bool(dw.get("wealth_numeric_verified"))
 
         prospect_tier = classify_prospect_tier(
             c,
@@ -829,7 +833,7 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         if dead_hist:
             label = "Low"
 
-        row_signal_type = sanitize_signal_type(summary, c, str(sig.get("signal_type") or "Other"))
+        row_signal_type = infer_signal_type(na, c, str(sig.get("signal_type") or "Other"))
         if row_signal_type == "Other" and (
             int(fwc.get("subscore") or 0) >= 12 or founder_wealth_score >= 18
         ):
@@ -897,6 +901,8 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
             "entity_type": str(c.get("entity_type") or "person"),
             "is_valid_prospect_person": bool(c.get("is_valid_prospect_person", True)),
             "commentary_only_row": commentary_only_row,
+            "normalized_article": na,
+            "parse_ok": bool(na.get("_parse_ok")),
         }
         if SHOW_DEBUG:
             legacy["debug_signal_reasons"] = clean.get("_debug_signal_reasons", "")
