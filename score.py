@@ -31,13 +31,17 @@ def compute_signal_score(
     """
     Combined score: event-type base + data-quality adjustments, capped at 100.
 
-    Adjustments: +20 person, +15 real company, +10 role, -15 when type is Other.
+    Bonuses: +20 person, +15 real company, +10 role.
+
+    Penalties: -30 when type is Other; -20 when person_name is empty; -15 when
+    company is missing or Unknown.
     """
     et = (event_type or "").strip()
     base = EVENT_BASE_SCORES.get(et, 50)
 
     score = base
-    if str(person_name or "").strip():
+    pn = str(person_name or "").strip()
+    if pn:
         score += 20
     cn = str(company_name or "").strip()
     if cn and cn != "Unknown":
@@ -45,6 +49,10 @@ def compute_signal_score(
     if str(role or "").strip():
         score += 10
     if et == "Other":
+        score -= 30
+    if not pn:
+        score -= 20
+    if not cn or cn.lower() == "unknown":
         score -= 15
 
     return max(0, min(100, score))

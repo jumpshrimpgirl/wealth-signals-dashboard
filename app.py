@@ -37,6 +37,17 @@ def _company_name_for_header(row) -> str:
     return cn
 
 
+def billionaire_badge_html(row) -> str:
+    """Small HTML badge when the person matched the billionaire / wealth list."""
+    v = row.get("is_billionaire")
+    if v is True or str(v).lower() == "true":
+        return (
+            '<span class="ws-badge" title="Matched billionaire list (net worth on file)" '
+            'style="background:#fef9c3;border:1px solid #eab308;">💰</span> '
+        )
+    return ""
+
+
 def format_signal_header_line(row) -> str:
     """
     Primary one-line signal title for cards and expanders.
@@ -830,7 +841,7 @@ with st.container(border=True, key="ws_card_priority"):
                 c1, c2 = st.columns([3, 1])
                 with c1:
                     st.markdown(
-                        f"""<p class="ws-card-line"><strong>{hl}</strong>{new_html}</p>""",
+                        f"""<p class="ws-card-line"><strong>{hl}</strong>{billionaire_badge_html(row)}{new_html}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -934,7 +945,7 @@ with st.container(border=True, key="ws_card_week"):
                 c1, c2 = st.columns([3, 1])
                 with c1:
                     st.markdown(
-                        f"""<p class="ws-card-line"><strong>{hl}</strong>{new_html}</p>""",
+                        f"""<p class="ws-card-line"><strong>{hl}</strong>{billionaire_badge_html(row)}{new_html}</p>""",
                         unsafe_allow_html=True,
                     )
                     st.markdown(
@@ -980,9 +991,15 @@ table_columns = [
     "source_url",
     "quality_score",
     "confidence_score",
+    "is_billionaire",
+    "net_worth",
+    "billionaire_company",
 ]
 
-ensure_columns_present(filtered, table_columns + ["detected_at"])
+ensure_columns_present(
+    filtered,
+    table_columns + ["detected_at", "is_billionaire", "net_worth", "billionaire_company"],
+)
 display_df = filtered[table_columns].copy()
 if not display_df.empty and "additional_people" in display_df.columns:
     display_df["additional_people"] = display_df["additional_people"].map(_format_additional_people)
@@ -993,6 +1010,8 @@ if not display_df.empty:
 if not display_df.empty and "event_date" in display_df.columns:
     display_df["event_date"] = pd.to_datetime(display_df["event_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     display_df["event_date"] = display_df["event_date"].fillna("-")
+if not display_df.empty and "is_billionaire" in display_df.columns:
+    display_df["is_billionaire"] = display_df["is_billionaire"].fillna(False).astype(bool)
 
 st.markdown(
     """
@@ -1029,6 +1048,9 @@ else:
             "source_url": st.column_config.LinkColumn("Source", width="medium"),
             "quality_score": st.column_config.NumberColumn("Quality", format="%d", width="small"),
             "confidence_score": st.column_config.NumberColumn("Conf.", format="%d", width="small"),
+            "is_billionaire": st.column_config.CheckboxColumn("Billionaire", width="small"),
+            "net_worth": st.column_config.TextColumn("Net worth (list)", width="small"),
+            "billionaire_company": st.column_config.TextColumn("List source co.", width="medium"),
         },
     )
 
@@ -1116,9 +1138,14 @@ with st.container(border=True, key="ws_details_explorer"):
                 det = human_time_ago(row.get("detected_at"))
                 with st.expander(title_plain):
                     st.markdown(
-                        f"""<p style="margin:0 0 0.75rem 0;">{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
+                        f"""<p style="margin:0 0 0.75rem 0;">{billionaire_badge_html(row)}{new_html} {priority_badge_html(row.get("priority_level", ""))}</p>""",
                         unsafe_allow_html=True,
                     )
+                    if row.get("is_billionaire"):
+                        st.caption(
+                            f"💰 Billionaire list: net worth {row.get('net_worth') or '—'} "
+                            f"({row.get('billionaire_company') or 'source —'})"
+                        )
                     if also:
                         st.caption(f"Also named in story: {also}")
                     st.markdown(f"**Raw title:** {row.get('raw_title', '-')}")

@@ -1,0 +1,364 @@
+Year,Yearly ranking ,Name,"Net worth (USD)
+(billion)",Age,Nationality,Source(s) of wealth
+2022,1,Elon Musk,$219 billion ,50, United States,"Tesla, SpaceX"
+2022,2,Jeff Bezos,$177 billion ,58, United States,Amazon
+2022,3,Bernard Arnault & family,$158 billion ,73, France,LVMH
+2022,4,Bill Gates,$129 billion ,66, United States,Microsoft
+2022,5,Warren Buffett,$118 billion ,91, United States,Berkshire Hathaway
+2022,6,Larry Page,$111 billion ,49, United States,Alphabet Inc.
+2022,7,Sergey Brin,$107 billion ,48, United States,Alphabet Inc.
+2022,8,Larry Ellison,$106 billion ,77, United States,Oracle Corporation
+2022,9,Steve Ballmer,$91.4 billion ,66, United States,Microsoft
+2022,10,Mukesh Ambani,$90.7 billion ,64, India,Reliance Industries
+2021,1 ,Jeff Bezos,$177 billion ,57, United States,Amazon
+2021,2 ,Elon Musk,$151 billion ,49, United States,"Tesla, SpaceX"
+2021,3 ,Bernard Arnault & family,$150 billion ,72, France,LVMH
+2021,4 ,Bill Gates,$124 billion ,65, United States,Microsoft
+2021,5 ,Mark Zuckerberg,$97 billion ,36, United States,Meta Platforms
+2021,6 ,Warren Buffett,$96 billion ,90, United States,Berkshire Hathaway
+2021,7 ,Larry Ellison,$93 billion ,76, United States,Oracle Corporation
+2021,8 ,Larry Page,$91.5 billion ,48, United States,Alphabet Inc.
+2021,9 ,Sergey Brin,$89 billion ,47, United States,Alphabet Inc.
+2021,10 ,Mukesh Ambani,$84.5 billion ,63, India,Reliance Industries
+2020,1 ,Jeff Bezos,$113 billion ,56, United States,Amazon
+2020,2 ,Bill Gates,$98 billion ,64, United States,Microsoft
+2020,3 ,Bernard Arnault & family,$76 billion ,71, France,LVMH
+2020,4 ,Warren Buffett,$67.5 billion ,89, United States,Berkshire Hathaway
+2020,5 ,Larry Ellison,$59 billion ,75, United States,Oracle Corporation
+2020,6 ,Amancio Ortega,$55.1 billion ,84, Spain,"Inditex, Zara"
+2020,7 ,Mark Zuckerberg,$54.7 billion ,35, United States,"Facebook, Inc."
+2020,8 ,Jim Walton,$54.6 billion ,71, United States,Walmart
+2020,9 ,Alice Walton,$54.4 billion ,70, United States,Walmart
+2020,10 ,S. Robson Walton,$54.1 billion ,77, United States,Walmart
+2019,1 ,Jeff Bezos,$131 billion ,55, United States,Amazon
+2019,2 ,Bill Gates,$96.5 billion ,63, United States,Microsoft
+2019,3 ,Warren Buffett,$82.5 billion ,88, United States,Berkshire Hathaway
+2019,4 ,Bernard Arnault,$76 billion ,70, France,LVMH
+2019,5 ,Carlos Slim,$64 billion ,79, Mexico,"América Móvil, Grupo Carso"
+2019,6 ,Amancio Ortega,$62.7 billion ,82, Spain,"Inditex, Zara"
+2019,7 ,Larry Ellison,$62.5 billion ,74, United States,Oracle Corporation
+2019,8 ,Mark Zuckerberg,$62.3 billion ,34, United States,"Facebook, Inc."
+2019,9 ,Michael Bloomberg,$55.5 billion ,77, United States,Bloomberg L.P.
+2019,10 ,Larry Page,$50.8 billion ,45, United States,Alphabet Inc.
+2018,1 ,Jeff Bezos,$112 billion ,54, United States,Amazon
+2018,2 ,Bill Gates,$90 billion ,62, United States,Microsoft
+2018,3 ,Warren Buffett,$84 billion ,87, United States,Berkshire Hathaway
+2018,4 ,Bernard Arnault,$72 billion ,69, France,LVMH
+2018,5 ,Mark Zuckerberg,$71 billion ,33, United States,"Facebook, Inc."
+2018,6 ,Amancio Ortega,$70 billion ,81, Spain,"Inditex, Zara"
+2018,7 ,Carlos Slim,$67.1 billion ,78, Mexico,"América Móvil, Grupo Carso"
+2018,8 ,Charles Koch,$60 billion ,82, United States,Koch Industries
+2018,8 ,David Koch,$60 billion ,77, United States,Koch Industries
+2018,10 ,Larry Ellison,$58.5 billion ,73, United States,Oracle Corporation
+2017,1 ,Bill Gates,$86.0 billion ,61, United States,Microsoft
+2017,2 ,Warren Buffett,$75.6 billion ,86, United States,Berkshire Hathaway
+2017,3 ,Jeff Bezos,$72.8 billion ,53, United States,Amazon
+2017,4 ,Amancio Ortega,$71.3 billion ,80, Spain,"Inditex, Zara"
+2017,5 ,Mark Zuckerberg,$56.0 billion ,32, United States,"Facebook, Inc."
+2017,6 ,Carlos Slim,$54.5 billion ,77, Mexico,"América Móvil, Grupo Carso"
+2017,7 ,Larry Ellison,$52.2 billion ,72, United States,Oracle Corporation
+2017,8 ,Charles Koch,$48.3 billion ,81, United States,Koch Industries
+2017,8 ,David Koch,$48.3 billion ,76, United States,Koch Industries
+2017,10 ,Michael Bloomberg,$47.5 billion ,75, United States,Bloomberg L.P.
+2016,1 ,Bill Gates,$75.0 billion ,60, United States,Microsoft
+2016,2 ,Amancio Ortega,$67.0 billion ,79, Spain,Inditex
+2016,3 ,Warren Buffett,$60.8 billion ,85, United States,Berkshire Hathaway
+2016,4 ,Carlos Slim,$50.0 billion ,76, Mexico,"América Móvil, Grupo Carso"
+2016,5 ,Jeff Bezos,$45.2 billion ,52, United States,Amazon
+2016,6 ,Mark Zuckerberg,$44.6 billion ,31, United States,"Facebook, Inc."
+2016,7 ,Larry Ellison,$43.6 billion ,71, United States,Oracle Corporation
+2016,8 ,Michael Bloomberg,$40.0 billion ,74, United States,Bloomberg L.P.
+2016,9 ,Charles Koch,$39.6 billion ,80, United States,Koch Industries
+2016,9 ,David Koch,$39.6 billion ,75, United States,Koch Industries
+2015,1 ,Bill Gates,$79.2 billion ,59, United States,Microsoft
+2015,2 ,Carlos Slim,$77.1 billion ,75, Mexico,"América Móvil, Grupo Carso"
+2015,3 ,Warren Buffett,$72.7 billion ,84, United States,Berkshire Hathaway
+2015,4 ,Amancio Ortega,$64.5 billion ,78, Spain,Inditex
+2015,5 ,Larry Ellison,$54.3 billion ,70, United States,Oracle Corporation
+2015,6 ,Charles Koch,$42.9 billion ,79, United States,Koch Industries
+2015,6 ,David Koch,$42.9 billion ,74, United States,Koch Industries
+2015,8 ,Christy Walton,$41.7 billion ,66, United States,Walmart
+2015,9 ,Jim Walton,$40.6 billion ,66, United States,Walmart
+2015,10 ,Liliane Bettencourt,$40.1 billion ,92, France,L'Oreal
+2014,1 ,Bill Gates,$76.0 billion ,58, United States,Microsoft
+2014,2 ,Carlos Slim & family,$72.0 billion ,74, Mexico,"América Móvil, Grupo Carso"
+2014,3 ,Amancio Ortega,$64.0 billion ,77, Spain,Inditex
+2014,4 ,Warren Buffett,$58.2 billion ,83, United States,Berkshire Hathaway
+2014,5 ,Larry Ellison,$48.0 billion ,70, United States,Oracle Corporation
+2014,6 ,Charles Koch,$40.0 billion ,78, United States,Koch Industries
+2014,6 ,David Koch,$40.0 billion ,73, United States,Koch Industries
+2014,8 ,Sheldon Adelson,$38.0 billion ,80, United States,Las Vegas Sands
+2014,9 ,Christy Walton & family,$36.7 billion ,65, United States,Walmart
+2014,10 ,Jim Walton,$34.7 billion ,65, United States,Walmart
+2013,1 ,Carlos Slim & family,$73.0 billion ,73, Mexico,"América Móvil, Grupo Carso"
+2013,2 ,Bill Gates,$67.0 billion ,57, United States,Microsoft
+2013,3 ,Amancio Ortega,$57.0 billion ,76, Spain,Inditex Group
+2013,4 ,Warren Buffett,$53.5 billion ,82, United States,Berkshire Hathaway
+2013,5 ,Larry Ellison,$43.0 billion ,68, United States,Oracle Corporation
+2013,6 ,Charles Koch,$34.0 billion ,77, United States,Koch Industries
+2013,6 ,David Koch,$34.0 billion ,72, United States,Koch Industries
+2013,8 ,Li Ka-shing,$31.0 billion ,84, Hong Kong,Cheung Kong Holdings
+2013,9 ,Liliane Bettencourt & family,$30.0 billion ,90, France,L'Oréal
+2013,10 ,Bernard Arnault,$29.0 billion ,63, France,LVMH
+2012,1 ,Carlos Slim & family,$69.0 billion ,72, Mexico,"América Móvil, Grupo Carso"
+2012,2 ,Bill Gates,$61.0 billion ,56, United States,Microsoft
+2012,3 ,Warren Buffett,$44.0 billion ,81, United States,Berkshire Hathaway
+2012,4 ,Bernard Arnault,$41.0 billion ,63, France,LVMH Moët Hennessy • Louis Vuitton
+2012,5 ,Amancio Ortega,$37.5 billion ,75, Spain,Inditex Group
+2012,6 ,Larry Ellison,$36.0 billion ,67, United States,Oracle Corporation
+2012,7 ,Eike Batista,$30.0 billion ,55, Brazil,EBX Group
+2012,8 ,Stefan Persson,$26.0 billion ,64, Sweden,H&M
+2012,9 ,Li Ka-shing,$25.5 billion ,83, Hong Kong,Cheung Kong Holdings
+2012,10 ,Karl Albrecht,$25.4 billion ,92, Germany,Aldi
+2011,1 ,Carlos Slim,$74.0 billion ,71, Mexico,"América Móvil, Grupo Carso"
+2011,2 ,Bill Gates,$56.0 billion ,55, United States,Microsoft
+2011,3 ,Warren Buffett,$50.0 billion ,80, United States,Berkshire Hathaway
+2011,4 ,Bernard Arnault,$41.0 billion ,62, France,LVMH Moët Hennessy • Louis Vuitton
+2011,5 ,Larry Ellison,$39.5 billion ,66, United States,Oracle Corporation
+2011,6 ,Lakshmi Mittal,$31.1 billion ,60, India,Arcelor Mittal
+2011,7 ,Amancio Ortega,$31.0 billion ,74, Spain,Inditex Group
+2011,8 ,Eike Batista,$30.0 billion ,53, Brazil,EBX Group
+2011,9 ,Mukesh Ambani,$27.0 billion ,54, India,Reliance Industries
+2011,10 ,Christy Walton & family,$26.5 billion ,62, United States,Walmart
+2010,1 ,Carlos Slim & family,$53.5 billion ,70, Mexico,"América Móvil, Grupo Carso"
+2010,2 ,Bill Gates,$53.0 billion ,54, United States,Microsoft
+2010,3 ,Warren Buffett,$47.0 billion ,79, United States,Berkshire Hathaway
+2010,4 ,Mukesh Ambani,$29.0 billion ,53, India,Reliance Industries
+2010,5 ,Lakshmi Mittal,$28.7 billion ,60, India,Arcelor Mittal
+2010,6 ,Larry Ellison,$28.0 billion ,66, United States,Oracle Corporation
+2010,7 ,Bernard Arnault,$27.5 billion ,61, France,LVMH Moët Hennessy • Louis Vuitton
+2010,8 ,Eike Batista,$27.0 billion ,53, Brazil,EBX Group
+2010,9 ,Amancio Ortega,$25.0 billion ,74, Spain,Inditex Group
+2010,10 ,Karl Albrecht,$23.5 billion ,90, Germany,Aldi Süd
+2009,1 ,Bill Gates,$40.0 billion ,53, United States,Microsoft
+2009,2 ,Warren Buffett,$37.0 billion ,78, United States,Berkshire Hathaway
+2009,3 ,Carlos Slim,$35.0 billion ,69, Mexico,"América Móvil, Grupo Carso"
+2009,4 ,Larry Ellison,$22.5 billion ,64, United States,Oracle Corporation
+2009,5 ,Ingvar Kamprad,$22.0 billion ,83, Sweden,IKEA
+2009,6 ,Karl Albrecht,$21.5 billion ,89, Germany,Aldi Süd
+2009,7 ,Mukesh Ambani,$19.5 billion ,52, India,Reliance Industries
+2009,8 ,Lakshmi Mittal,$19.3 billion ,58, India,Arcelor Mittal
+2009,9 ,Theo Albrecht,$18.8 billion ,87, Germany,"Aldi Nord, Trader Joe's"
+2009,10 ,Amancio Ortega,$18.3 billion ,73, Spain,Inditex Group
+2008,1 ,Warren Buffett,$62.0 billion ,77, United States,Berkshire Hathaway
+2008,2 ,Carlos Slim,$60.0 billion ,68, Mexico,"América Móvil, Grupo Carso"
+2008,3 ,Bill Gates,$58.0 billion ,52, United States,Microsoft
+2008,4 ,Lakshmi Mittal,$45.0 billion ,57, India,Arcelor Mittal
+2008,5 ,Mukesh Ambani,$43.0 billion ,51, India,Reliance Industries
+2008,6 ,Anil Ambani,$42.0 billion ,48, India,Anil Dhirubhai Ambani Group
+2008,7 ,Ingvar Kamprad,$31.0 billion ,81, Sweden,IKEA
+2008,8 ,Kushal Pal Singh,$30.0 billion ,76, India,DLF Group
+2008,9 ,Oleg Deripaska,$28.0 billion ,40, Russia,Rusal
+2008,10 ,Karl Albrecht,$27.0 billion ,88, Germany,Aldi Süd
+2007,1 ,Bill Gates,$56.0 billion ,51, United States,Microsoft
+2007,2 ,Warren Buffett,$52.0 billion ,76, United States,Berkshire Hathaway
+2007,3 ,Carlos Slim,$49.0 billion ,67, Mexico,"América Móvil, Grupo Carso"
+2007,4 ,Ingvar Kamprad,$33.0 billion ,80, Sweden,IKEA
+2007,5 ,Lakshmi Mittal,$32.0 billion ,56, India,Arcelor Mittal
+2007,6 ,Sheldon Adelson,$26.5 billion ,73, United States,Las Vegas Sands
+2007,7 ,Bernard Arnault,$26.0 billion ,58, France,LVMH
+2007,8 ,Amancio Ortega,$24.0 billion ,71, Spain,Inditex Group
+2007,9 ,Li Ka-shing,$23.0 billion ,78, Hong Kong,"Cheung Kong Holdings, Hutchison Whampoa"
+2007,10 ,David Thomson,$22.0 billion ,49, Canada,Thomson Corporation
+2006,1 ,Bill Gates,$52.0 billion ,50, United States,Microsoft
+2006,2 ,Warren Buffett,$42.0 billion ,75, United States,Berkshire Hathaway
+2006,3 ,Carlos Slim,$30.0 billion ,66, Mexico,"América Móvil, Grupo Carso"
+2006,4 ,Ingvar Kamprad,$28.0 billion ,79, Sweden,IKEA
+2006,5 ,Lakshmi Mittal,$23.5 billion ,55, India,Mittal Steel Company
+2006,6 ,Paul Allen,$22.0 billion ,53, United States,Microsoft
+2006,7 ,Bernard Arnault,$21.5 billion ,57, France,LVMH Moët Hennessy • Louis Vuitton
+2006,8 ,Al-Waleed bin Talal,$20.0 billion ,49, Saudi Arabia,Kingdom Holding Company
+2006,9 ,Kenneth Thomson,$19.6 billion ,82, Canada,Thomson Corporation
+2006,10 ,Li Ka-shing,$18.8 billion ,77, Hong Kong,"Cheung Kong Group, Hutchison Whampoa"
+2005,1 ,Bill Gates,$46.5 billion ,49, United States,Microsoft
+2005,2 ,Warren Buffett,$44.0 billion ,74, United States,Berkshire Hathaway
+2005,3 ,Lakshmi Mittal,$25.0 billion ,54, India,Mittal Steel Company
+2005,4 ,Carlos Slim,$23.8 billion ,65, Mexico,"América Móvil, Grupo Carso"
+2005,5 ,Al-Waleed bin Talal,$23.7 billion ,49, Saudi Arabia,Kingdom Holding Company
+2005,6 ,Ingvar Kamprad,$23.0 billion ,79, Sweden,IKEA
+2005,7 ,Paul Allen,$21.0 billion ,52, United States,Microsoft
+2005,8 ,Karl Albrecht,$18.5 billion ,85, Germany,Aldi Süd
+2005,9 ,Larry Ellison,$18.4 billion ,60, United States,Oracle Corporation
+2005,10 ,S. Robson Walton,$18.3 billion ,61, United States,Walmart
+2004,1 ,Bill Gates,$46.6 billion ,48, United States,Microsoft
+2004,2 ,Warren Buffett,$42.9 billion ,73, United States,Berkshire Hathaway
+2004,3 ,Karl Albrecht,$23.0 billion ,84, Germany,Aldi Süd
+2004,4 ,Al-Waleed bin Talal,$21.5 billion ,47, Saudi Arabia,Kingdom Holding Company
+2004,5 ,Paul Allen,$21.0 billion ,51, United States,Microsoft
+2004,6 ,Alice Walton,$20.0 billion ,55, United States,Wal-Mart
+2004,6 ,Helen Walton,$20.0 billion ,84, United States,Wal-Mart
+2004,6 ,Jim Walton,$20.0 billion ,56, United States,Wal-Mart
+2004,6 ,John Walton,$20.0 billion ,58, United States,Wal-Mart
+2004,6 ,S. Robson Walton,$20.0 billion ,60, United States,Wal-Mart
+2003,1 ,Bill Gates,$40.7 billion ,47, United States,Microsoft
+2003,2 ,Warren Buffett,$30.5 billion ,72, United States,Berkshire Hathaway
+2003,3 ,Karl and Theo Albrecht,$25.6 billion ,83, Germany,Aldi Süd
+2003,4 ,Paul Allen,$20.1 billion ,50, United States,Microsoft
+2003,5 ,Al-Waleed bin Talal,$17.7 billion ,46, Saudi Arabia,Kingdom Holding Company
+2003,6 ,Larry Ellison,$16.6 billion ,58, United States,Oracle Corporation
+2003,7 ,Alice Walton,$16.5 billion ,54, United States,Wal-Mart
+2003,7 ,Helen Walton,$16.5 billion ,83, United States,Wal-Mart
+2003,7 ,Jim Walton,$16.5 billion ,55, United States,Wal-Mart
+2003,7 ,John Walton,$16.5 billion ,57, United States,Wal-Mart
+2003,7 ,S. Robson Walton,$16.5 billion ,59, United States,Wal-Mart
+2002,1 ,Bill Gates,$52.8 billion ,46, United States,Microsoft
+2002,2 ,Warren Buffett,$35.0 billion ,71, United States,Berkshire Hathaway
+2002,3 ,Karl and Theo Albrecht,$26.8 billion ,82, Germany,Aldi Süd
+2002,4 ,Paul Allen,$25.2 billion ,49, United States,Microsoft
+2002,5 ,Larry Ellison,$23.5 billion ,57, United States,Oracle Corporation
+2002,6 ,Jim Walton,$20.8 billion ,54, United States,Wal-Mart
+2002,7 ,John Walton,$20.7 billion ,56, United States,Wal-Mart
+2002,8 ,Alice Walton,$20.5 billion ,53, United States,Wal-Mart
+2002,8 ,S. Robson Walton,$20.5 billion ,58, United States,Wal-Mart
+2002,8 ,Helen Walton,$20.5 billion ,82, United States,Wal-Mart
+2001,1 ,Bill Gates,$58.7 billion ,45, United States,Microsoft
+2001,2 ,Warren Buffett,$32.3 billion ,70, United States,Berkshire Hathaway
+2001,3 ,Paul Allen,$30.4 billion ,48, United States,Microsoft
+2001,4 ,Larry Ellison,$26.0 billion ,56, United States,Oracle Corporation
+2001,5 ,Karl and Theo Albrecht,$25.0 billion ,81, Germany,Aldi
+2001,6 ,Al-Waleed bin Talal,$20.0 billion ,44, Saudi Arabia,Kingdom Holding Company
+2001,7 ,Jim Walton,$18.8 billion ,53, United States,Wal-Mart
+2001,8 ,John Walton,$18.7 billion ,55, United States,Wal-Mart
+2001,9 ,S. Robson Walton,$18.6 billion ,57, United States,Wal-Mart
+2001,10 ,Alice Walton,$18.5 billion ,52, United States,Wal-Mart
+2001,10 ,Helen Walton,$18.5 billion ,81, United States,Wal-Mart
+2000,1 ,Bill Gates,$60.0 billion ,44, United States,Microsoft
+2000,2 ,Larry Ellison,$47.0 billion  ,55, United States,Oracle Corporation
+2000,3 ,Paul Allen,$28.0 billion ,47, United States,Microsoft
+2000,4 ,Warren Buffett,$25.6 billion ,69, United States,Berkshire Hathaway
+2000,5 ,Karl and Theo Albrecht,$20.0 billion  ,80, Germany,Aldi Süd
+2000,6 ,Al-Waleed bin Talal,$20.0 billion ,43, Saudi Arabia,Kingdom Holding Company
+2000,7 ,S. Robson Walton,$20.0 billion ,57, United States,Wal-Mart
+2000,8 ,Masayoshi Son,$19.4 billion ,43, Japan,"Softbank Capital, SoftBank Mobile"
+2000,9 ,Michael Dell,$19.1 billion ,35, United States,Dell
+2000,10 ,Kenneth Thomson,$16.1 billion ,77, Canada,The Thomson Corporation
+1999,1 ,Bill Gates,$90.0 billion ,43, United States,Microsoft
+1999,2 ,Warren Buffett,$36.0 billion ,68, United States,Berkshire Hathaway
+1999,3 ,Paul Allen,$30.0 billion ,46, United States,Microsoft
+1999,4 ,Steven Ballmer,$19.5 billion ,43, United States,Microsoft
+1999,5 ,Philip Anschutz,$16.5 billion ,59, United States,The Anschutz Corporation
+1999,6 ,Michael Dell,$16.5 billion ,34, United States,Dell
+1999,7 ,S. Robson Walton,$15.8 billion,55, United States,Wal-Mart
+1999,8 ,Al-Waleed Bin Talal,$15.0 billion ,42, Saudi Arabia,Kingdom Holding Company
+1999,9 ,Karl and Theo Albrecht,$13.6 billion ,79, Germany,Aldi Süd
+1999,10 ,Li Ka-shing & family,$12.6 billion ,71, Hong Kong,CK Asset Holdings[46]
+1998,1 ,Bill Gates,$51.0 billion ,43, United States,Microsoft
+1998,2 ,Walton family,$48.0 billion ,_, United States,Wal-Mart
+1998,3 ,Warren Buffett,$33.0 billion ,67, United States,Berkshire Hathaway
+1998,4 ,Paul Allen,$21.0 billion ,45, United States,Microsoft
+1998,5 ,Kenneth Thomson,$14.4 billion ,74, Canada,Woodbridge Co. Ltd.[47]
+1998,6 ,Jay and Robert Pritzker,$13.5 billion ,_, United States,Hyatt[48]
+1998,7 ,Forrest Mars Sr. & family,$13.5 billion ,94, United States,"Mars, Inc.[49]"
+1998,8 ,Al-Waleed Bin Talal,$13.3 billion ,41, Saudi Arabia,Kingdom Holding Company
+1998,9 ,Lee Shau-kee,$12.7 billion ,70, Hong Kong,Henderson Land Development[50]
+1998,10 ,Karl and Theo Albrecht,$11.7 billion ,78, Germany,Aldi Süd
+1997,1 ,Bill Gates,$36.4 billion ,42, United States,Microsoft
+1997,2 ,Walton family,$27.6 billion ,_, United States,Wal-Mart
+1997,3 ,Warren Buffett,$23.2 billion ,66, United States,Berkshire Hathaway
+1997,4 ,Lee Shau-kee,$14.7 billion ,69, Hong Kong,Henderson Land Development[50]
+1997,5 ,Paul Allen,$14.1 billion ,44, United States,Microsoft
+1997,6 ,Kwok brothers,$12.3 billion ,48, Hong Kong,Sun Hung Kai Properties[51]
+1997,7 ,Haas family,$12.3 billion ,_, United States,Levi Strauss & Co[52]
+1997,8 ,Forrest Mars Sr. & family,$12.0 billion ,93, United States,"Mars, Inc.[49]"
+1997,9 ,Karl and Theo Albrecht,$11.5 billion ,77, Germany,Aldi Süd
+1997,10 ,Tsai Wan-lin & family,$11.3 billion ,73, Taiwan,Cathay Life Insurance[53]
+1996,1 ,Walton family,$22.9 billion ,_, United States,Wal-Mart
+1996,2 ,Bill Gates,$18.0 billion ,41, United States,Microsoft
+1996,3 ,Warren Buffett,$15.3 billion ,65, United States,Berkshire Hathaway
+1996,4 ,"Oeri, Hoffman & Sacher families",$13.1 billion ,_, Switzerland,Roche[54]
+1996,5 ,Lee Shau-kee,$12.7 billion ,68, Hong Kong,Henderson Land Development[50]
+1996,6 ,Tsai Wan-lin & family,$12.2 billion ,72, Taiwan,Cathay Life Insurance[53]
+1996,7 ,Kwok brothers,$11.2 billion ,_, Hong Kong,Sun Hung Kai Properties[51]
+1996,8 ,Li Ka-shing & family,$10.6 billion ,68, Hong Kong,CK Asset Holdings[46]
+1996,9 ,Yoshiaki Tsutsumi,$9.2 billion ,62, Japan,Seibu Railway[55]
+1996,10 ,Karl and Theo Albrecht,$9.0 billion ,76, Germany,Aldi Süd[56]
+1995,1 ,Walton family,$23.5 billion ,/, United States,/
+1995,2 ,Bill Gates,$12.9 billion ,/, United States,/
+1995,3 ,Warren Buffett,$10.7 billion ,/, United States,/
+1995,4 ,Hans and Gad Rausing,$9.0 billion ,/, Sweden,/
+1995,5 ,Yoshiaki Tsutsumi,$9.0 billion ,/, Japan,/
+1995,6 ,Paul Sacher & Hoffman family,$8.6 billion ,/, Switzerland,/
+1995,7 ,Tsai Wan-lin & family,$8.5 billion ,/, Taiwan,/
+1995,8 ,Kenneth Thomson,$6.5 billion ,/, Canada,/
+1995,9 ,Lee Shau-kee,$6.5 billion,/, Hong Kong,/
+1995,10 ,Chung Ju-yung,$6.2 billion,/, South Korea,/
+1994,1 ,Walton family,$22.6 billion ,/, United States,/
+1994,2 ,du Pont family,$9.0 billion ,/, United States,/
+1994,3 ,Hans and Gad Rausing,$9.0 billion ,/, Sweden,/
+1994,4 ,Yoshiaki Tsutsumi,$8.5 billion ,/, Japan,/
+1994,5 ,Bill Gates,$8.2 billion ,/, United States,/
+1994,6 ,Warren Buffett,$7.9 billion ,/, United States,/
+1994,7 ,Paul Sacher & Hoffman family,$7.8 billion ,/, Switzerland,/
+1994,8 ,Tsai Wan-lin & family,$7.5 billion ,/, Taiwan,/
+1994,9 ,Karl and Theo Albrecht,$7.3 billion ,/, Germany,/
+1994,10 ,Carlos Slim,$6.6 billion ,/, Mexico,/
+1993,1 ,Walton family,$25.3 billion ,/, United States,/
+1993,2 ,Mars family,$9.2 billion ,/, United States,/
+1993,3 ,Yoshiaki Tsutsumi,$9.0 billion ,/, Japan,/
+1993,4 ,du Pont family,$8.6 billion ,/, United States,/
+1993,5 ,Minoru and Akira Mori,$7.5 billion ,/, Japan,/
+1993,6 ,Bill Gates,$7.4 billion ,/, United States,/
+1993,7 ,Samuel and Donald Newhouse,$7.0 billion ,/, United States,/
+1993,8 ,Sid and Lee Bass & brothers,$6.8 billion ,/, United States,/
+1993,9 ,Warren Buffett,$6.6 billion ,/, United States,/
+1993,10 ,Erivan Haub,$6.2 billion ,/, Germany,/
+1992,1 ,Walton family,$23.8 billion ,/, United States,/
+1992,2 ,Taikichiro Mori,$13.0 billion ,/, Japan,/
+1992,3 ,Yoshiaki Tsutsumi,$10.0 billion ,/, Japan,/
+1992,4 ,Hans and Gad Rausing,$7.0 billion ,/, Sweden,/
+1992,5 ,Erivan Haub,$6.9 billion ,/, Germany,/
+1992,6 ,Haniel family,$6.4 billion ,/, Germany,/
+1992,7 ,Bill Gates,$6.4 billion ,/, United States,/
+1992,8 ,David Sainsbury & family,$6.2 billion ,/, United Kingdom,/
+1992,9 ,Kenneth Thomson,$6.2 billion ,/, Canada,/
+1992,10 ,Shin Kyuk-ho,$6.0 billion ,/, South Korea,/
+1991,1 ,Walton family,$18.5 billion ,/, United States,/
+1991,2 ,Taikichiro Mori,$15.0 billion ,/, Japan,/
+1991,3 ,Yoshiaki Tsutsumi,$14.0 billion ,/, Japan,/
+1991,4 ,du Pont family,$10.0 billion ,/, United States,/
+1991,5 ,Hans and Gad Rausing,$9.0 billion ,/, Sweden,/
+1991,6 ,Kitaro Watanabe [ja],$7.7 billion ,/, Japan,/
+1991,7 ,Paul Reichmann & brothers,$7.1 billion ,/, Canada,/
+1991,8 ,Kenneth Thomson,$6.8 billion ,/, Canada,/
+1991,9 ,Kenkichi Nakajima [Wikidata],$6.1 billion ,/, Japan,/
+1991,10 ,Shin Kyuk-ho,$6.0 billion ,/, South Korea,/
+1990,1 ,Yoshiaki Tsutsumi,$16.0 billion ,/, Japan,/
+1990,2 ,Taikichiro Mori,$14.6 billion ,/, Japan,/
+1990,3 ,Walton family,$13.5 billion ,/, United States,/
+1990,4 ,du Pont family,$10.0 billion  ,/, United States,/
+1990,5 ,Hans and Gad Rausing,$9.6 billion  ,/, Sweden,/
+1990,6 ,Kitaro Watanabe [ja],$9.2 billion ,/, Japan,/
+1990,7 ,Paul Reichmann & brothers,$9.0 billion ,/, Canada,/
+1990,8 ,Kenkichi Nakajima [Wikidata],$8.4 billion ,/, Japan,/
+1990,9 ,Shin Kyuk-ho,$7.5 billion ,/, South Korea,/
+1990,10 ,Eitaro Itoyama,$5.8 billion ,/, Japan,/
+1989,1 ,Yoshiaki Tsutsumi,$15.0 billion ,/, Japan,/
+1989,2 ,Taikichiro Mori,$14.2 billion ,/, Japan,/
+1989,3 ,Sam Walton & family,$8.7 billion ,/, United States,/
+1989,4 ,Reichmann brothers,$8.0 billion  ,/, Canada,/
+1989,4 ,Shin Kyuk-ho,$8.0 billion  ,/, South Korea,/
+1989,6 ,Hirotomo Takei [ja] & family,$7.8 billion ,/, Japan,/
+1989,7 ,Kitaro Watanabe [ja],$7.0 billion+ ,/, Japan,/
+1989,8 ,Haruhiko Yoshimoto [Wikidata]& family,$7.0 billion ,/, Japan,/
+1989,8 ,Hans and Gad Rausing,$7.0 billion ,/, Sweden,/
+1989,10 ,Eitaro Itoyama,$6.6 billion ,/, Japan,/
+1988,1,Yoshiaki Tsutsumi,$18.9 billion,/, Japan,/
+1988,2,Taikichiro Mori,$18.0 billion,/, Japan,/
+1988,3,Reichmann brothers,$9.0 billion,/, Canada,/
+1988,4,Shin Kyuk-ho,$8.0 billion ,/, South Korea,/
+1988,4,K. C. Irving,$8.0 billion ,/, Canada,/
+1988,6,Haruhiko Yoshimoto [Wikidata],$7.8 billion,/, Japan,/
+1988,7,Sam Walton,$6.5 billion,/, United States,/
+1988,8,Tsai Wan-lin,$5.6 billion,/, Taiwan,/
+1988,9,Eitaro Itoyama,$5.0 billion+,/, Japan,/
+1988,10,Kitaro Watanabe [ja],$5.2 billion,/, Japan,/
+1987,1,Yoshiaki Tsutsumi,$20 billion,/, Japan,/
+1987,2,Taikichiro Mori,$15 billion,/, Japan,/
+1987,3,Shigeru Kobayashi [ja],$7.5 billion,/, Japan,/
+1987,4,Haruhiko Yoshimoto [Wikidata],$7.0 billion,/, Japan,/
+1987,5,Salim Ahmed Bin Mahfouz [ar],$6.2 billion,/, Saudi Arabia,/
+1987,6,Hans and Gad Rausing,$6.0 billion,/, Sweden,/
+1987,7,Paul Reichmann,$6.0 billion,/, Canada,/
+1987,8,Yohachiro Iwasaki [ja],$5.6 billion,/, Japan,/
+1987,9,Kenneth Thomson,$5.4 billion ,/, Canada,/
+1987,10,Keizo Saji,$4.0 billion,/, Japan,/

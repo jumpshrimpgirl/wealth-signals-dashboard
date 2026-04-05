@@ -12,6 +12,7 @@ import os
 import re
 from collections.abc import Callable
 from datetime import datetime, timezone
+from difflib import get_close_matches
 from typing import Any
 from urllib.parse import urlparse
 
@@ -53,7 +54,162 @@ REQUIRED_COLUMNS = [
     "full_explanation",
     "quality_score",
     "confidence_score",
+    "is_relevant",
+    "is_billionaire",
+    "net_worth",
+    "billionaire_company",
 ]
+
+# -----------------------------------------------------------------------------
+# Kaggle-style billionaire list (``datasets/billionaires.csv``)
+# -----------------------------------------------------------------------------
+_BILLIONAIRE_LOOKUP_CACHE: dict[str, dict[str, Any]] | None = None
+
+
+def load_billionaire_data() -> pd.DataFrame:
+    """Load the local billionaire CSV (Kaggle-style export). Returns empty frame if missing."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasets", "billionaires.csv")
+    if not os.path.isfile(path):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, encoding="latin-1")
+    except (OSError, UnicodeDecodeError):
+        try:
+            return pd.read_csv(path, encoding="utf-8", errors="replace")
+        except OSError:
+            return pd.DataFrame()
+
+
+def clean_billionaire_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep latest year, usable ages, and drop estate / family rows."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    if "year" not in df.columns and "Year" in df.columns:
+        df["year"] = pd.to_numeric(df["Year"], errors="coerce")
+    if "year" in df.columns:
+        ymax = df["year"].max()
+        if pd.notna(ymax):
+            df = df[df["year"] == ymax]
+    if "personName" in df.columns:
+        df["name"] = df["personName"].astype(str)
+    elif "full_name" in df.columns:
+        df["name"] = df["full_name"].astype(str)
+    elif "Name" in df.columns:
+        df["name"] = df["Name"].astype(str)
+    elif "name" in df.columns:
+        df["name"] = df["name"].astype(str)
+    else:
+        df["name"] = ""
+    df["name"] = df["name"].str.replace(r"\s+", " ", regex=True).str.strip()
+    acol = "age" if "age" in df.columns else ("Age" if "Age" in df.columns else None)
+    if acol:
+        df[acol] = pd.to_numeric(df[acol], errors="coerce")
+        df = df[df[acol].notnull()]
+        df = df[(df[acol] >= 18) & (df[acol] <= 85)]
+    df = df[~df["name"].str.contains(r"Estate|Heirs|Family", case=False, na=False, regex=True)]
+    df["name"] = df["name"].str.strip()
+    nw = None
+    for cand in ("finalWorth", "net_worth"):
+        if cand in df.columns:
+            nw = df[cand]
+            break
+    if nw is None:
+        for c in df.columns:
+            if "net" in str(c).lower() and "worth" in str(c).lower():
+                nw = df[c]
+                break
+    df["finalWorth"] = nw if nw is not None else ""
+    org = None
+    for cand in ("organization", "source", "Source(s) of wealth"):
+        if cand in df.columns:
+            org = df[cand]
+            break
+    df["organization"] = org if org is not None else ""
+    cat = None
+    for cand in ("category", "Nationality"):
+        if cand in df.columns:
+            cat = df[cand]
+            break
+    df["category"] = cat if cat is not None else None
+    return df
+
+
+def build_billionaire_lookup(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    if df is None or df.empty:
+        return lookup
+    for _, row in df.iterrows():
+        name = str(row.get("name", "") or "").strip().lower()
+        if not name:
+            continue
+        nw = row.get("finalWorth", row.get("net_worth", None))
+        if pd.isna(nw):
+            nw = None
+        else:
+            nw = str(nw).strip()
+        oc = row.get("organization", row.get("source", None))
+        if pd.isna(oc):
+            oc = None
+        else:
+            oc = str(oc).strip()
+        ic = row.get("category", None)
+        if pd.isna(ic):
+            ic = None
+        else:
+            ic = str(ic).strip()
+        lookup[name] = {"net_worth": nw, "company": oc, "industry": ic}
+    return lookup
+
+
+def match_name(name: str, lookup: dict[str, dict[str, Any]]) -> str | None:
+    """Fuzzy match ``name`` to a key in ``lookup`` (exact lower, else difflib)."""
+    if not lookup or not (name or "").strip():
+        return None
+    key = name.strip().lower()
+    if key in lookup:
+        return key
+    matches = get_close_matches(key, list(lookup.keys()), n=1, cutoff=0.85)
+    return matches[0] if matches else None
+
+
+def get_billionaire_lookup() -> dict[str, dict[str, Any]]:
+    """Load, clean, and cache a name → {net_worth, company, industry} map."""
+    global _BILLIONAIRE_LOOKUP_CACHE
+    if _BILLIONAIRE_LOOKUP_CACHE is None:
+        try:
+            bdf = clean_billionaire_data(load_billionaire_data())
+            _BILLIONAIRE_LOOKUP_CACHE = build_billionaire_lookup(bdf)
+        except Exception:
+            _BILLIONAIRE_LOOKUP_CACHE = {}
+    return _BILLIONAIRE_LOOKUP_CACHE
+
+
+def _enrich_signals_with_billionaire_list(out: pd.DataFrame) -> None:
+    """Match ``person_name`` to the billionaire table; boost score and set wealth fields."""
+    if out.empty:
+        return
+    lookup = get_billionaire_lookup()
+    for idx in out.index:
+        out.at[idx, "is_billionaire"] = False
+        out.at[idx, "net_worth"] = ""
+        out.at[idx, "billionaire_company"] = ""
+        pn = str(out.at[idx, "person_name"] or "").strip().lower()
+        if not pn or not lookup:
+            continue
+        m = match_name(pn, lookup)
+        if not m:
+            continue
+        data = lookup[m]
+        out.at[idx, "is_billionaire"] = True
+        nw = data.get("net_worth")
+        out.at[idx, "net_worth"] = "" if nw is None else str(nw)
+        bc = data.get("company")
+        out.at[idx, "billionaire_company"] = "" if bc is None else str(bc)
+        sc = int(out.at[idx, "score"])
+        out.at[idx, "score"] = min(sc + 40, 100)
+    out["is_billionaire"] = out["is_billionaire"].fillna(False).astype(bool)
+
 
 # -----------------------------------------------------------------------------
 # Public RSS feeds (business / tech news). Swap or extend as needed.
@@ -633,14 +789,20 @@ def compute_extraction_quality(row: pd.Series) -> int:
 
 def compute_confidence_score(row: pd.Series) -> int:
     """
-    0-100: combines extraction quality with signal score for curated top sections.
+    0-100: blends extraction quality + signal bump with structured pattern confidence.
 
-    Higher quality dominates; score adds a modest bump so High-priority rows surface.
+    Pattern score (funding / M&A / promotion / board regexes, minus negative hits)
+    is merged with the legacy quality×11 formula, then clamped.
     """
     q = int(row.get("quality_score", 0) or 0)
     s = int(row.get("score", 0) or 0)
     bump = min(15, max(0, s - 45) // 3)
-    return int(min(100, q * 11 + bump))
+    legacy = int(min(100, q * 11 + bump))
+    blob = f"{str(row.get('raw_title', '') or '')} {str(row.get('full_explanation', '') or '')}".strip()
+    leg_et = str(row.get("event_type", "") or "").strip() or None
+    _, pattern_raw = structured_pattern_confidence_and_type(blob, legacy_event_type=leg_et)
+    merged = legacy + pattern_raw
+    return int(max(0, min(100, merged)))
 
 
 def why_it_matters_for_event_type(event_type: str) -> str:
@@ -831,7 +993,7 @@ def ensure_signal_anchor(out: pd.DataFrame) -> None:
 
     When person_name is missing and company is empty or ``Unknown``, try (in order):
     ``at`` / ``from`` / ``of`` spans in ``raw_title``, then hostname from ``source_url``,
-    then a shortened headline; final fallback ``News source``.
+    then a shortened headline. Each candidate is validated; invalid names become ``Unknown``.
     """
     if out.empty:
         return
@@ -844,14 +1006,15 @@ def ensure_signal_anchor(out: pd.DataFrame) -> None:
     for idx in out.loc[need].index:
         t = str(out.at[idx, "raw_title"] or "")
         u = str(out.at[idx, "source_url"] or "")
-        new_c = _company_from_title_at_from_of(t)
-        if not new_c:
-            new_c = _company_label_from_url(u)
-        if not new_c and t:
-            new_c = _title_as_company_anchor(t)
-        if not new_c:
-            new_c = "News source"
-        out.at[idx, "company_name"] = new_c
+        chosen = ""
+        for cand in (_company_from_title_at_from_of(t), _company_label_from_url(u), _title_as_company_anchor(t) if t else ""):
+            if not cand:
+                continue
+            sc = sanitize_company_name(cand)
+            if sc:
+                chosen = sc
+                break
+        out.at[idx, "company_name"] = chosen if chosen else "Unknown"
 
 
 def dedupe_signals_cross_source(out: pd.DataFrame) -> pd.DataFrame:
@@ -919,6 +1082,524 @@ def _normalize_company_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
 
 
+# --- Company name validation (reject garbage, locations, generic words) ---
+_COMPANY_EXACT_REJECT = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "least",
+        "maybe",
+        "news",
+        "source",
+        "news source",
+    }
+)
+
+# Common English / headline words that are not company names (match whole string, case-insensitive).
+_COMPANY_STOPWORDS = frozenset(
+    {
+        "about",
+        "after",
+        "again",
+        "all",
+        "also",
+        "an",
+        "and",
+        "another",
+        "any",
+        "are",
+        "around",
+        "as",
+        "ask",
+        "at",
+        "back",
+        "be",
+        "because",
+        "been",
+        "before",
+        "being",
+        "between",
+        "both",
+        "but",
+        "by",
+        "can",
+        "could",
+        "day",
+        "did",
+        "do",
+        "does",
+        "down",
+        "each",
+        "even",
+        "ever",
+        "every",
+        "few",
+        "first",
+        "for",
+        "four",
+        "from",
+        "get",
+        "give",
+        "go",
+        "good",
+        "had",
+        "has",
+        "have",
+        "having",
+        "her",
+        "here",
+        "him",
+        "his",
+        "how",
+        "if",
+        "into",
+        "its",
+        "just",
+        "know",
+        "last",
+        "least",
+        "like",
+        "long",
+        "made",
+        "make",
+        "many",
+        "may",
+        "maybe",
+        "me",
+        "might",
+        "more",
+        "most",
+        "much",
+        "must",
+        "my",
+        "never",
+        "new",
+        "next",
+        "no",
+        "not",
+        "now",
+        "off",
+        "old",
+        "on",
+        "once",
+        "one",
+        "only",
+        "or",
+        "other",
+        "our",
+        "out",
+        "over",
+        "own",
+        "part",
+        "people",
+        "place",
+        "put",
+        "said",
+        "same",
+        "say",
+        "says",
+        "see",
+        "several",
+        "shall",
+        "she",
+        "should",
+        "show",
+        "side",
+        "since",
+        "so",
+        "some",
+        "still",
+        "such",
+        "take",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "thing",
+        "this",
+        "those",
+        "three",
+        "through",
+        "too",
+        "two",
+        "under",
+        "until",
+        "up",
+        "upon",
+        "us",
+        "use",
+        "used",
+        "very",
+        "want",
+        "was",
+        "way",
+        "we",
+        "well",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "why",
+        "will",
+        "with",
+        "within",
+        "without",
+        "would",
+        "year",
+        "you",
+        "your",
+    }
+)
+
+# Single-token place names (lowercase) — US states, countries, major cities; ambiguous tokens omitted.
+_PLACE_SINGLE_WORD_LOWER = frozenset(
+    {
+        "afghanistan",
+        "alabama",
+        "alaska",
+        "albania",
+        "algeria",
+        "anchorage",
+        "andorra",
+        "angola",
+        "argentina",
+        "arizona",
+        "arkansas",
+        "armenia",
+        "australia",
+        "austria",
+        "azerbaijan",
+        "bahrain",
+        "bangladesh",
+        "barcelona",
+        "belarus",
+        "belgium",
+        "bentonville",
+        "birmingham",
+        "bolivia",
+        "boston",
+        "brazil",
+        "brisbane",
+        "bulgaria",
+        "calcutta",
+        "calgary",
+        "california",
+        "cambodia",
+        "cameroon",
+        "canada",
+        "chicago",
+        "chile",
+        "china",
+        "cincinnati",
+        "cleveland",
+        "colombia",
+        "colorado",
+        "columbus",
+        "connecticut",
+        "copenhagen",
+        "costa",
+        "croatia",
+        "cuba",
+        "cyprus",
+        "czechia",
+        "dallas",
+        "delaware",
+        "denmark",
+        "denver",
+        "detroit",
+        "dublin",
+        "ecuador",
+        "edmonton",
+        "egypt",
+        "estonia",
+        "ethiopia",
+        "finland",
+        "florida",
+        "france",
+        "frankfurt",
+        "geneva",
+        "georgia",
+        "germany",
+        "ghana",
+        "glasgow",
+        "greece",
+        "greenville",
+        "guatemala",
+        "hamburg",
+        "hawaii",
+        "helsinki",
+        "honduras",
+        "houston",
+        "hungary",
+        "iceland",
+        "illinois",
+        "india",
+        "indiana",
+        "indianapolis",
+        "indonesia",
+        "iowa",
+        "iran",
+        "iraq",
+        "ireland",
+        "israel",
+        "italy",
+        "jacksonville",
+        "jakarta",
+        "japan",
+        "jordan",
+        "kansas",
+        "kentucky",
+        "kenya",
+        "korea",
+        "kuwait",
+        "kyrgyzstan",
+        "latvia",
+        "lebanon",
+        "lisbon",
+        "lithuania",
+        "london",
+        "louisiana",
+        "louisville",
+        "luxembourg",
+        "macau",
+        "madrid",
+        "maine",
+        "malaysia",
+        "malta",
+        "manila",
+        "maryland",
+        "massachusetts",
+        "melbourne",
+        "memphis",
+        "mexico",
+        "miami",
+        "michigan",
+        "milwaukee",
+        "minneapolis",
+        "minnesota",
+        "mississippi",
+        "missouri",
+        "moldova",
+        "monaco",
+        "mongolia",
+        "montana",
+        "montreal",
+        "morocco",
+        "moscow",
+        "mumbai",
+        "munich",
+        "nashville",
+        "nebraska",
+        "nepal",
+        "netherlands",
+        "nevada",
+        "newark",
+        "nicaragua",
+        "nigeria",
+        "norway",
+        "nottingham",
+        "ohio",
+        "oklahoma",
+        "oman",
+        "oregon",
+        "orlando",
+        "osaka",
+        "ottawa",
+        "pakistan",
+        "panama",
+        "paris",
+        "pennsylvania",
+        "perth",
+        "peru",
+        "philadelphia",
+        "phoenix",
+        "pittsburgh",
+        "poland",
+        "portland",
+        "portugal",
+        "prague",
+        "qatar",
+        "quebec",
+        "raleigh",
+        "richmond",
+        "romania",
+        "rome",
+        "russia",
+        "rwanda",
+        "sacramento",
+        "santiago",
+        "saskatchewan",
+        "saudi",
+        "scotland",
+        "seattle",
+        "serbia",
+        "shanghai",
+        "singapore",
+        "slovakia",
+        "slovenia",
+        "somalia",
+        "spain",
+        "stockholm",
+        "sudan",
+        "sweden",
+        "switzerland",
+        "sydney",
+        "taiwan",
+        "tampa",
+        "tennessee",
+        "texas",
+        "thailand",
+        "tokyo",
+        "toronto",
+        "tucson",
+        "tulsa",
+        "tunisia",
+        "turkey",
+        "turkmenistan",
+        "uae",
+        "uganda",
+        "ukraine",
+        "uruguay",
+        "utah",
+        "uzbekistan",
+        "vancouver",
+        "venezuela",
+        "vienna",
+        "vietnam",
+        "virginia",
+        "warsaw",
+        "wisconsin",
+        "yemen",
+        "zambia",
+        "zimbabwe",
+        "zurich",
+    }
+)
+
+# Multi-word locations (normalized: single spaces, lower case).
+_PLACE_PHRASE_LOWER = frozenset(
+    {
+        "costa rica",
+        "czech republic",
+        "district of columbia",
+        "el salvador",
+        "hong kong",
+        "los angeles",
+        "new hampshire",
+        "new jersey",
+        "new mexico",
+        "new orleans",
+        "new york",
+        "new zealand",
+        "north carolina",
+        "north dakota",
+        "north korea",
+        "puerto rico",
+        "san antonio",
+        "san diego",
+        "san francisco",
+        "san jose",
+        "saudi arabia",
+        "south africa",
+        "south carolina",
+        "south dakota",
+        "south korea",
+        "sri lanka",
+        "united arab emirates",
+        "united kingdom",
+        "united states",
+        "west virginia",
+    }
+)
+
+# Single-word lowercase tokens that are valid company names (skip the all-lowercase rejection).
+_LOWERCASE_COMPANY_ALLOWLIST_LOWER = frozenset(
+    {
+        "amazon",
+        "apple",
+        "microsoft",
+        "oracle",
+        "dell",
+        "cisco",
+        "adobe",
+        "salesforce",
+        "palantir",
+        "stripe",
+        "square",
+        "visa",
+        "mastercard",
+        "intel",
+        "nvidia",
+        "samsung",
+        "sony",
+        "toyota",
+        "honda",
+        "nissan",
+        "uber",
+        "lyft",
+        "spotify",
+        "netflix",
+        "twitter",
+        "linkedin",
+        "facebook",
+        "google",
+        "yahoo",
+        "oracle",
+    }
+)
+
+
+def _normalize_company_place_key(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").lower().strip())
+
+
+def sanitize_company_name(name: str) -> str:
+    """
+    Return a cleaned company name, or "" if the value is not a plausible company
+    (too short, stopword, place name, etc.).
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return ""
+    low = _normalize_company_place_key(raw)
+    if raw.lower() == "unknown":
+        return ""
+    if len(raw) < 3:
+        return ""
+    if low in _COMPANY_EXACT_REJECT:
+        return ""
+    if low in _COMPANY_STOPWORDS:
+        return ""
+    # Single token, all ASCII letters lowercase — usually noise; allow known brands.
+    if re.fullmatch(r"[a-z]+", raw.strip()) and low not in _LOWERCASE_COMPANY_ALLOWLIST_LOWER:
+        return ""
+    if low in _PLACE_PHRASE_LOWER:
+        return ""
+    if low in _PLACE_SINGLE_WORD_LOWER and low not in _LOWERCASE_COMPANY_ALLOWLIST_LOWER:
+        return ""
+    return raw
+
+
+def normalize_company_name_field(name: str) -> str:
+    """Public normalization for storage: valid company or ``Unknown``."""
+    s = sanitize_company_name(name)
+    return s if s else "Unknown"
+
+
+def _company_qualifies_for_score_boost(company_name: str) -> bool:
+    """True when company is known-valid (not garbage/Unknown) — used for enrichment/funding bonuses."""
+    return bool(sanitize_company_name(company_name or ""))
+
+
 def _extract_stage_and_industry_from_text(text: str) -> tuple[str, str]:
     """Best-effort stage / industry from article body when mock data misses."""
     t = (text or "").lower()
@@ -954,7 +1635,7 @@ def enrich_company_data(company_name: str, article_text: str = "") -> dict[str, 
     out: dict[str, str] = {"industry": "", "stage": "", "description": "", "location": ""}
     try:
         cn = (company_name or "").strip()
-        if not cn or cn.lower() == "unknown":
+        if not cn or cn.lower() == "unknown" or not sanitize_company_name(cn):
             return out
 
         norm = _normalize_company_key(cn)
@@ -984,8 +1665,10 @@ def enrich_company_data(company_name: str, article_text: str = "") -> dict[str, 
         return {"industry": "", "stage": "", "description": "", "location": ""}
 
 
-def _enrichment_score_bonus(stage: str, industry: str) -> int:
+def _enrichment_score_bonus(stage: str, industry: str, company_name: str = "") -> int:
     """Extra score points from structured company enrichment; combined with base score (clip 0–100)."""
+    if not _company_qualifies_for_score_boost(company_name):
+        return 0
     bonus = 0
     st = (stage or "").strip()
     if any(x in st for x in ("Series B", "Series C", "Series D")):
@@ -1084,6 +1767,259 @@ def _funding_deal_score_bonus(funding_amount_str: str) -> int:
     return 0
 
 
+# --- Hard relevance: drop geopolitical / legal / cyber noise (before classification in RSS) ---
+_HARD_NOISE_SUBSTRINGS = (
+    "cyberattack",
+    "data breach",
+    "war",
+    "missile",
+    "military",
+    "government",
+    "trial",
+    "lawsuit",
+    "investigation",
+)
+
+_SOFT_ACTION_RE = re.compile(
+    r"\b(?:"
+    r"funding|funded|raises?|raised|financing|seed|venture|round|"
+    r"invest(?:ment|or)?|ipo|unicorn|valuation|series\s+[a-e]|"
+    r"appoints?|appointed|joins?|joining|hired|hiring|named|promoted|promotion|"
+    r"ceo|cfo|cto|coo|chief|executive|board|director|leadership|founder|co-founder|"
+    r"acquisition|acquired|acquires|merger|layoff|resigns|succession|partner"
+    r")\b",
+    re.I,
+)
+
+# Classify-style keywords not fully covered by _SOFT_ACTION_RE (same sentence as actor).
+_EXTRA_EVENT_KEYWORD_RE = re.compile(
+    r"\b(?:buyout|takeover|sold|exit|divests?|buys)\b"
+    r"|boardroom"
+    r"|stepping\s+down"
+    r"|new\s+role"
+    r"|executive\s+shuffle",
+    re.I,
+)
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    """Split on sentence boundaries; preserves single block when no delimiter."""
+    blob = (text or "").strip()
+    if not blob:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+|\n+", blob)
+    out = [p.strip() for p in parts if p.strip()]
+    return out if out else [blob]
+
+
+def _sentence_has_event_keyword(sentence: str) -> bool:
+    """True if this sentence contains an event-type keyword (classify / career / soft action)."""
+    s = (sentence or "").strip()
+    if not s:
+        return False
+    if _SOFT_ACTION_RE.search(s):
+        return True
+    if _EXTRA_EVENT_KEYWORD_RE.search(s):
+        return True
+    return _finance_career_broad(s)
+
+
+def _person_name_in_sentence(sentence_lower: str, person_name: str) -> bool:
+    """True if the sentence references the person (full name or distinctive token)."""
+    p = (person_name or "").strip().lower()
+    if len(p) < 2:
+        return False
+    if p in sentence_lower:
+        return True
+    parts = [re.sub(r"[^a-z0-9]", "", x) for x in p.split() if x]
+    for w in parts:
+        if len(w) >= 2 and w in sentence_lower:
+            return True
+    return False
+
+
+def _company_name_in_sentence(sentence_lower: str, company_name: str) -> bool:
+    """True if the sentence references the company (full name or major token, e.g. Helio from Helio Robotics)."""
+    c = (company_name or "").strip().lower()
+    if not c or c == "unknown":
+        return False
+    if c in sentence_lower:
+        return True
+    for w in c.split():
+        w = re.sub(r"[^a-z0-9]", "", w)
+        if len(w) >= 2 and w in sentence_lower:
+            return True
+    return False
+
+
+def _sentence_has_actor(sentence: str, person_name: str, company_name: str) -> bool:
+    """True if sentence mentions the extracted person and/or a valid company name."""
+    sl = (sentence or "").lower()
+    pn = (person_name or "").strip()
+    cn = (company_name or "").strip()
+    cn_ok = bool(cn) and cn.lower() != "unknown"
+    pn_ok = len(pn) >= 2
+    if not pn_ok and not cn_ok:
+        return False
+    if pn_ok and _person_name_in_sentence(sl, pn):
+        return True
+    if cn_ok and _company_name_in_sentence(sl, cn):
+        return True
+    return False
+
+
+def _opportunity_sentence_gate(text_blob: str, person_name: str, company_name: str) -> bool:
+    """
+    Keep only if at least one sentence contains both an event keyword and (person OR company).
+
+    Otherwise the row is not treated as an actionable opportunity.
+    """
+    sents = _split_into_sentences(text_blob or "")
+    if not sents and (text_blob or "").strip():
+        sents = [(text_blob or "").strip()]
+    for sent in sents:
+        if _sentence_has_event_keyword(sent) and _sentence_has_actor(sent, person_name, company_name):
+            return True
+    return False
+
+
+# --- Structured financial / career pattern detection (regex + sentence structure) ---
+_RE_STRUCT_FUNDING_DOLLAR = re.compile(
+    r"\$[0-9]+(?:\.[0-9]+)?\s?(?:M|B|million|billion)\b",
+    re.I,
+)
+_RE_STRUCT_FUNDING_SERIES = re.compile(r"Series\s+[A-C]\b", re.I)
+_RE_STRUCT_VALUATION = re.compile(r"\bvaluation\b", re.I)
+
+_RE_STRUCT_PROMOTION_1 = re.compile(
+    r"[A-Z][a-z]+\s+[A-Z][a-z]+\s+(?:joins|joined|appointed|named|takes\s+over)\s+.*?(?:CEO|CFO|CTO)\b",
+    re.I | re.DOTALL,
+)
+_RE_STRUCT_PROMOTION_2 = re.compile(
+    r"(?:CEO|CFO|CTO)\s+of\s+[A-Z][a-zA-Z]+",
+    re.I,
+)
+
+_RE_STRUCT_MA_VERB = re.compile(
+    r"\b(?:acquire|acquires|acquired|buy|buys|bought)\b",
+    re.I,
+)
+_RE_STRUCT_MA_DEAL = re.compile(r"deal\s+(?:worth|valued)\s+\$", re.I)
+
+_RE_STRUCT_BOARD_ROLE = re.compile(r"\b(?:board|director|chairman)\b", re.I)
+_RE_STRUCT_BOARD_VERB = re.compile(r"\b(?:joins|appointed|named)\b", re.I)
+
+_STRUCTURED_NEGATIVE_SUBSTRINGS = (
+    "cyberattack",
+    "breach",
+    "war",
+    "lawsuit",
+    "trial",
+    "killed",
+    "investigation",
+)
+
+
+def structured_pattern_confidence_and_type(
+    text: str,
+    legacy_event_type: str | None = None,
+) -> tuple[str | None, int]:
+    """
+    Score structured financial/career signals from patterns (not keywords alone).
+
+    Returns (event_type or None, raw confidence). Drop rows when raw confidence < 20.
+
+    When no structured bucket matches but ``legacy_event_type`` is set (e.g. headline
+    classifier), adds +25 so keyword-classified items can still pass the gate.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None, 0
+
+    conf = 0
+
+    negative_hit = False
+    for s in _split_into_sentences(raw) + [raw]:
+        sl = s.lower()
+        if any(bad in sl for bad in _STRUCTURED_NEGATIVE_SUBSTRINGS):
+            negative_hit = True
+            break
+
+    if negative_hit:
+        # Reject structured bonuses; only legacy headline path can partially offset.
+        leg = (legacy_event_type or "").strip()
+        conf = -50 + (25 if leg else 0)
+        return (leg or None, conf)
+
+    funding = bool(
+        _RE_STRUCT_FUNDING_DOLLAR.search(raw)
+        or _RE_STRUCT_FUNDING_SERIES.search(raw)
+        or _RE_STRUCT_VALUATION.search(raw)
+    )
+    promotion = bool(_RE_STRUCT_PROMOTION_1.search(raw) or _RE_STRUCT_PROMOTION_2.search(raw))
+    ma = bool(_RE_STRUCT_MA_VERB.search(raw) or _RE_STRUCT_MA_DEAL.search(raw))
+    board = False
+    for sent in _split_into_sentences(raw) or [raw]:
+        if _RE_STRUCT_BOARD_ROLE.search(sent) and _RE_STRUCT_BOARD_VERB.search(sent):
+            board = True
+            break
+
+    if funding:
+        conf += 40
+    if promotion:
+        conf += 30
+    if ma:
+        conf += 40
+    if board:
+        conf += 25
+
+    et: str | None = None
+    if ma:
+        et = "Founder Exit"
+    elif funding:
+        et = "Funding"
+    elif promotion:
+        et = "Promotion"
+    elif board:
+        et = "Board Appointment"
+
+    leg = (legacy_event_type or "").strip()
+    if et is None and leg:
+        conf += 25
+        et = leg
+
+    return et, conf
+
+
+def _text_matches_hard_noise_blocklist(text: str) -> bool:
+    """True if article text should be rejected (non-actionable / noisy topics)."""
+    t = (text or "").lower()
+    if any(s in t for s in _HARD_NOISE_SUBSTRINGS):
+        return True
+    return bool(re.search(r"\bhacks?\b|\bhacking\b", t))
+
+
+def _is_relevant_signal(
+    text_blob: str,
+    company_name: str,
+    person_name: str = "",
+    legacy_event_type: str | None = None,
+) -> bool:
+    """
+    Actionable career/wealth signal filter.
+
+    - Reject hard-noise topics (cyber, war, legal, etc.).
+    - Drop when structured pattern confidence < 20 (see ``structured_pattern_confidence_and_type``).
+    - Require at least one sentence with an event keyword AND (person OR company) in that sentence.
+    """
+    if _text_matches_hard_noise_blocklist(text_blob):
+        return False
+    _, conf = structured_pattern_confidence_and_type(text_blob, legacy_event_type=legacy_event_type)
+    if conf < 20:
+        return False
+    return _opportunity_sentence_gate(text_blob, person_name, company_name)
+
+
 def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize a signals table so the UI always gets safe, consistent data.
@@ -1130,7 +2066,7 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     out["company_name"] = out["company_name"].fillna("").astype(str).str.strip()
     if not out.empty:
         ensure_signal_anchor(out)
-    out.loc[out["company_name"] == "", "company_name"] = "Unknown"
+    out["company_name"] = out["company_name"].map(normalize_company_name_field)
 
     out["event_type"] = out["event_type"].fillna("").astype(str).str.strip()
     out["why_it_matters"] = out["why_it_matters"].fillna("").astype(str).str.strip()
@@ -1160,6 +2096,17 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         ):
             if col in out.columns:
                 out[col] = out[col].fillna("").astype(str).str.strip()
+
+        out["is_relevant"] = out.apply(
+            lambda r: _is_relevant_signal(
+                f"{r.get('raw_title', '')} {r.get('full_explanation', '')}",
+                str(r.get("company_name", "")),
+                str(r.get("person_name", "")),
+                legacy_event_type=str(r.get("event_type", "") or "").strip() or None,
+            ),
+            axis=1,
+        )
+        out = out[out["is_relevant"]].copy()
 
     # Fill why_it_matters when missing
     missing_blurb = out["why_it_matters"] == ""
@@ -1193,14 +2140,21 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             lambda row: _enrichment_score_bonus(
                 str(row.get("stage", "")),
                 str(row.get("industry", "")),
+                str(row.get("company_name", "")),
             ),
             axis=1,
         )
         out["score"] = out["score"] + out.apply(
-            lambda row: _funding_deal_score_bonus(str(row.get("funding_amount", ""))),
+            lambda row: (
+                _funding_deal_score_bonus(str(row.get("funding_amount", "")))
+                if _company_qualifies_for_score_boost(str(row.get("company_name", "")))
+                else 0
+            ),
             axis=1,
         )
         out["score"] = out["score"].clip(0, 100).astype(int)
+
+        _enrich_signals_with_billionaire_list(out)
 
     # --- Action layer: who to prioritize and what to say (derived from score + event_type) ---
     out["outreach_angle"] = out.apply(generate_outreach_angle, axis=1)
@@ -1667,6 +2621,7 @@ def _guess_company_name(title: str) -> str:
     """
     t = title
     lower = t.lower()
+    candidate = ""
 
     # "... acquires/buys Something ..."
     for needle in (" acquires ", " acquired ", " buys "):
@@ -1676,39 +2631,40 @@ def _guess_company_name(title: str) -> str:
             # Stop at common delimiters
             rest = re.split(r" for |,|\.|;|\||–|-", rest, maxsplit=1)[0].strip()
             if rest and len(rest) < 120:
-                return rest
+                candidate = rest
+                break
 
-    # "... at CompanyName ..."
-    m = re.search(r"\s+at\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
-    if m:
-        return m.group(1).strip()
+    if not candidate:
+        m = re.search(r"\s+at\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
+        if m:
+            candidate = m.group(1).strip()
 
-    # "... from CompanyName ..."
-    m = re.search(r"\s+from\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
-    if m:
-        return m.group(1).strip()
+    if not candidate:
+        m = re.search(r"\s+from\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
+        if m:
+            candidate = m.group(1).strip()
 
-    # "... of CompanyName ..."
-    m = re.search(r"\s+of\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
-    if m:
-        return m.group(1).strip()
+    if not candidate:
+        m = re.search(r"\s+of\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
+        if m:
+            candidate = m.group(1).strip()
 
-    # "... joins CompanyName ..."
-    m = re.search(r"\s+joins\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
-    if m:
-        return m.group(1).strip()
+    if not candidate:
+        m = re.search(r"\s+joins\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)(?:\s|$|,|\.)", t)
+        if m:
+            candidate = m.group(1).strip()
 
-    # "... appointed to CompanyName board ..."
-    m = re.search(r"appointed\s+to\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)\s+board", t, re.I)
-    if m:
-        return m.group(1).strip()
+    if not candidate:
+        m = re.search(r"appointed\s+to\s+([A-Za-z0-9][A-Za-z0-9 &\-\.]{1,60}?)\s+board", t, re.I)
+        if m:
+            candidate = m.group(1).strip()
 
-    # "CompanyName raises ..."
-    m = re.match(r"^([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)?)\s+raises\b", t)
-    if m:
-        return m.group(1).strip()
+    if not candidate:
+        m = re.match(r"^([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)?)\s+raises\b", t)
+        if m:
+            candidate = m.group(1).strip()
 
-    return "Unknown"
+    return normalize_company_name_field(candidate)
 
 
 def _guess_role(title: str) -> str:
@@ -1777,7 +2733,7 @@ def _merge_ai_extraction_for_row(
     # Full overwrite from AI for structured fields (regex extras dropped — single AI snapshot)
     person = str(parsed.get("person_name", "") or "").strip()
     extra_people = []
-    company = str(parsed.get("company_name", "") or "").strip()
+    company = normalize_company_name_field(str(parsed.get("company_name", "") or "").strip())
     role = str(parsed.get("role", "") or "").strip()
     et_ai = str(parsed.get("event_type", "") or "").strip()
     if et_ai:
@@ -1820,13 +2776,22 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         seen_urls.add(link)
 
         summary = _strip_html(getattr(entry, "summary", None) or getattr(entry, "description", None) or "")
-        full_explanation = summary or f"(No summary in feed.) Headline: {title}"
+        base_summary = summary or f"(No summary in feed.) Headline: {title}"
 
         article_paragraphs = fetch_article_paragraph_text(link)
+        body_snip = (article_paragraphs or "").strip()[:3000]
+        full_explanation = base_summary
+        if body_snip:
+            full_explanation = (base_summary + "\n\n" + body_snip).strip()[:4000]
+
         extraction_text = _extraction_text(article_paragraphs, title)
 
-        event_type = _classify_event_type(extraction_text)
-        if not event_type:
+        blob_for_filter = f"{title} {summary} {article_paragraphs}".strip()
+        if _text_matches_hard_noise_blocklist(blob_for_filter):
+            continue
+
+        legacy_et = _classify_event_type(extraction_text)
+        if not legacy_et:
             continue
 
         # 1) Fast regex / heuristics on article body (or title if fetch failed)
@@ -1835,9 +2800,22 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         role = _guess_role(extraction_text)
 
         # 2) If person_name missing or invalid → AI fallback; 3) overwrite with AI output when used
-        person, extra_people, company, role, event_type = _merge_ai_extraction_for_row(
-            title, article_paragraphs, summary, person, extra_people, company, role, event_type
+        person, extra_people, company, role, event_type_merged = _merge_ai_extraction_for_row(
+            title, article_paragraphs, summary, person, extra_people, company, role, legacy_et
         )
+
+        scan_text = f"{title} {summary} {extraction_text}".strip()
+        structured_et, _ = structured_pattern_confidence_and_type(scan_text, legacy_event_type=legacy_et)
+        event_type = structured_et if structured_et is not None else event_type_merged
+
+        if not _is_relevant_signal(
+            blob_for_filter,
+            company,
+            person,
+            legacy_event_type=legacy_et,
+        ):
+            continue
+
         why = why_it_matters_for_event_type(event_type)
 
         rows.append(
@@ -1855,6 +2833,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                 "full_explanation": full_explanation[:4000],
                 "quality_score": 0,
                 "confidence_score": 0,
+                "is_relevant": True,
             }
         )
 
