@@ -17,6 +17,7 @@ import streamlit as st
 
 from data import fetch_signals, format_wealth
 from person_validation import is_valid_person
+from prospect_clean import clean_and_standardize
 from slack_alerts import send_slack_alert
 
 
@@ -39,6 +40,8 @@ HOME_TOP_SIGNALS = 5
 
 # Explore view: drop weak / noisy rows (after sidebar filters)
 EXPLORE_MIN_SCORE = 30
+# Validated prospect table: smart score (``score_prospect``) floor for top tier
+TOP_TIER_MIN_SMART_CONFIDENCE = 50
 
 # Columns searched by the sidebar text box (must stay aligned with Details / table labels).
 SEARCHABLE_COLUMNS = (
@@ -1684,71 +1687,136 @@ with tab_explore:
             f"or note that this view hides **Other** stories and scores below **{EXPLORE_MIN_SCORE}**."
         )
     else:
-        display_narrow = explore_view[_NARROW_COLS].copy()
-        display_narrow = display_narrow.rename(columns=_DISPLAY_RENAME)
-        st.dataframe(
-            display_narrow,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Name": st.column_config.TextColumn(
-                    "Name",
-                    width="medium",
-                    help="Identified individual; prospecting target.",
-                ),
-                "Role / title": st.column_config.TextColumn(
-                    "Role / title",
-                    width="medium",
-                    help="Current or stated role (e.g. CEO, founder).",
-                ),
-                "Company": st.column_config.TextColumn(
-                    "Company",
-                    width="medium",
-                    help="Associated company or employer when known.",
-                ),
-                "Wealth signal": st.column_config.TextColumn(
-                    "Wealth signal",
-                    width="small",
-                    help="Strong / Moderate / Weak / None — how clearly the story implies money or liquidity (AI may refine).",
-                ),
-                "Liquidity event": st.column_config.TextColumn(
-                    "Liquidity event",
-                    width="small",
-                    help="Yes / Potential / No — is cash, stock sale, funding, or similar in play?",
-                ),
-                "Est. wealth (display)": st.column_config.TextColumn(
-                    "Est. wealth (display)",
-                    width="small",
-                    help="Parsed or inferred estimate for this row; 'Data pending' when unknown.",
-                ),
-                "Client type": st.column_config.TextColumn(
-                    "Client type",
-                    width="medium",
-                    help="Founder, executive, investor, athlete, heir, etc.",
-                ),
-                "Prospect quality": st.column_config.TextColumn(
-                    "Prospect quality",
-                    width="small",
-                    help="AI tier: Excellent / Possible / Low-value / Not actionable.",
-                ),
-                "Signal label": st.column_config.TextColumn(
-                    "Signal label",
-                    width="medium",
-                    help="High financial signal from the article, but enrichment confidence is still low — follow up manually.",
-                ),
-                "FA usefulness": st.column_config.NumberColumn(
-                    "FA usefulness",
-                    width="small",
-                    help="0–100: how useful this article is for advisor prospecting (AI decision layer).",
-                    format="%d",
-                ),
-                "AI summary": st.column_config.TextColumn(
-                    "AI summary",
-                    width="large",
-                    help="Advisor-style summary or headline fallback.",
-                ),
-            },
-        )
+        cleaned_rows = clean_and_standardize(explore_view.to_dict("records"))
+        _CLEAN_RENAME = {
+            "name": "Name",
+            "role": "Role / title",
+            "company": "Company",
+            "signal_type": "Signal type",
+            "priority": "Priority",
+            "confidence": "Confidence",
+            "est_wealth": "Est. wealth",
+        }
+        if cleaned_rows:
+            st.caption(
+                "Validated pipeline: two-word names, target roles (founder/CEO/etc.), real company, "
+                "no obvious org/region/fictional/deceased cues; **Confidence** is a 0–100 smart score (role, signals, "
+                f"$ magnitude, recency). Table shows **top tier** rows with confidence **> {TOP_TIER_MIN_SMART_CONFIDENCE}**; "
+                "if none qualify, all validated rows are shown."
+            )
+            cdf = pd.DataFrame(cleaned_rows)[
+                ["name", "role", "company", "signal_type", "priority", "confidence", "est_wealth"]
+            ]
+            cdf_top = cdf[cdf["confidence"] > TOP_TIER_MIN_SMART_CONFIDENCE]
+            if cdf_top.empty:
+                st.info(
+                    f"No validated prospects with smart confidence **> {TOP_TIER_MIN_SMART_CONFIDENCE}** — "
+                    "showing every validated row (sorted by confidence)."
+                )
+                cdf = cdf.rename(columns=_CLEAN_RENAME)
+            else:
+                cdf = cdf_top.rename(columns=_CLEAN_RENAME)
+            st.dataframe(
+                cdf,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Name": st.column_config.TextColumn("Name", width="medium"),
+                    "Role / title": st.column_config.TextColumn("Role / title", width="medium"),
+                    "Company": st.column_config.TextColumn("Company", width="medium"),
+                    "Signal type": st.column_config.TextColumn(
+                        "Signal type",
+                        width="small",
+                        help="Event or wealth-signal category.",
+                    ),
+                    "Priority": st.column_config.TextColumn(
+                        "Priority",
+                        width="small",
+                        help="HIGH / MEDIUM / LOW from signal strength and rules.",
+                    ),
+                    "Confidence": st.column_config.NumberColumn(
+                        "Confidence",
+                        width="small",
+                        format="%d",
+                        help="0–100 smart prioritization score (entity penalties, role, company, deal text, money, recency).",
+                    ),
+                    "Est. wealth": st.column_config.TextColumn(
+                        "Est. wealth",
+                        width="small",
+                        help="Parsed $ from text or role-based band; Data pending if unknown.",
+                    ),
+                },
+            )
+        else:
+            st.info(
+                "No rows passed the strict validation pipeline (e.g. two-word name, target role, company required). "
+                "Showing the full **Explore** columns below."
+            )
+            display_narrow = explore_view[_NARROW_COLS].copy()
+            display_narrow = display_narrow.rename(columns=_DISPLAY_RENAME)
+            st.dataframe(
+                display_narrow,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Name": st.column_config.TextColumn(
+                        "Name",
+                        width="medium",
+                        help="Identified individual; prospecting target.",
+                    ),
+                    "Role / title": st.column_config.TextColumn(
+                        "Role / title",
+                        width="medium",
+                        help="Current or stated role (e.g. CEO, founder).",
+                    ),
+                    "Company": st.column_config.TextColumn(
+                        "Company",
+                        width="medium",
+                        help="Associated company or employer when known.",
+                    ),
+                    "Wealth signal": st.column_config.TextColumn(
+                        "Wealth signal",
+                        width="small",
+                        help="Strong / Moderate / Weak / None — how clearly the story implies money or liquidity (AI may refine).",
+                    ),
+                    "Liquidity event": st.column_config.TextColumn(
+                        "Liquidity event",
+                        width="small",
+                        help="Yes / Potential / No — is cash, stock sale, funding, or similar in play?",
+                    ),
+                    "Est. wealth (display)": st.column_config.TextColumn(
+                        "Est. wealth (display)",
+                        width="small",
+                        help="Parsed or inferred estimate for this row; 'Data pending' when unknown.",
+                    ),
+                    "Client type": st.column_config.TextColumn(
+                        "Client type",
+                        width="medium",
+                        help="Founder, executive, investor, athlete, heir, etc.",
+                    ),
+                    "Prospect quality": st.column_config.TextColumn(
+                        "Prospect quality",
+                        width="small",
+                        help="AI tier: Excellent / Possible / Low-value / Not actionable.",
+                    ),
+                    "Signal label": st.column_config.TextColumn(
+                        "Signal label",
+                        width="medium",
+                        help="High financial signal from the article, but enrichment confidence is still low — follow up manually.",
+                    ),
+                    "FA usefulness": st.column_config.NumberColumn(
+                        "FA usefulness",
+                        width="small",
+                        help="0–100: how useful this article is for advisor prospecting (AI decision layer).",
+                        format="%d",
+                    ),
+                    "AI summary": st.column_config.TextColumn(
+                        "AI summary",
+                        width="large",
+                        help="Advisor-style summary or headline fallback.",
+                    ),
+                },
+            )
     
     # -----------------------------------------------------------------------------
     # Details: compact scrollable panel (expandable rows)
