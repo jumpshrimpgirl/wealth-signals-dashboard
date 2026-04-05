@@ -53,10 +53,22 @@ def billionaire_badge_html(row) -> str:
 
 def target_client_badge_html(row) -> str:
     """Badge for primary target (high wealth / deal) or mid-tier ($1M–$5M est.)."""
+    try:
+        agg = float(row.get("aggregated_estimated_wealth") or 0)
+    except (TypeError, ValueError):
+        agg = 0.0
+    hot = agg >= 10_000_000
     v = row.get("target_client")
     if v is True or str(v).lower() == "true":
+        fire = (
+            '<span class="ws-badge" title="Multi-signal wealth: $10M+ estimated across your feed for this person" '
+            'style="background:#fef2f2;border:1px solid #ef4444;">🔥</span> '
+            if hot
+            else ""
+        )
         return (
-            '<span class="ws-badge" title="Target client: strong wealth or $5M+ estimated personal stake" '
+            fire
+            + '<span class="ws-badge" title="Target client: strong wealth or $5M+ estimated personal stake" '
             'style="background:#dcfce7;border:1px solid #22c55e;">★</span> '
         )
     if v == "mid" or str(v).lower() == "mid":
@@ -995,6 +1007,7 @@ table_columns = [
     "score",
     "wealth_score",
     "estimated_wealth",
+    "aggregated_estimated_wealth",
     "target_client",
     "priority_level",
     "outreach_angle",
@@ -1006,6 +1019,9 @@ table_columns = [
     "net_worth",
     "billionaire_company",
     "priority",
+    "repeat_person",
+    "linked_wealth_signal",
+    "repeat_company",
 ]
 
 ensure_columns_present(
@@ -1015,11 +1031,15 @@ ensure_columns_present(
         "detected_at",
         "wealth_score",
         "estimated_wealth",
+        "aggregated_estimated_wealth",
         "target_client",
         "is_billionaire",
         "net_worth",
         "billionaire_company",
         "priority",
+        "repeat_person",
+        "linked_wealth_signal",
+        "repeat_company",
     ],
 )
 display_df = filtered[table_columns].copy()
@@ -1042,6 +1062,16 @@ if not display_df.empty and "estimated_wealth" in display_df.columns:
     display_df["estimated_wealth"] = pd.to_numeric(
         display_df["estimated_wealth"], errors="coerce"
     ).fillna(0.0)
+if not display_df.empty and "aggregated_estimated_wealth" in display_df.columns:
+    display_df["aggregated_estimated_wealth"] = pd.to_numeric(
+        display_df["aggregated_estimated_wealth"], errors="coerce"
+    ).fillna(0.0)
+if not display_df.empty and "repeat_person" in display_df.columns:
+    display_df["repeat_person"] = display_df["repeat_person"].fillna(False).astype(bool)
+if not display_df.empty and "linked_wealth_signal" in display_df.columns:
+    display_df["linked_wealth_signal"] = display_df["linked_wealth_signal"].fillna(False).astype(bool)
+if not display_df.empty and "repeat_company" in display_df.columns:
+    display_df["repeat_company"] = display_df["repeat_company"].fillna(False).astype(bool)
 
 st.markdown(
     """
@@ -1073,6 +1103,7 @@ else:
             "score": st.column_config.NumberColumn("Score", format="%d", width="small"),
             "wealth_score": st.column_config.NumberColumn("Wealth", format="%d", width="small"),
             "estimated_wealth": st.column_config.NumberColumn("Est. $", format="$%d", width="small"),
+            "aggregated_estimated_wealth": st.column_config.NumberColumn("Agg. $", format="$%d", width="small"),
             "target_client": st.column_config.TextColumn("Target", width="small"),
             "priority_level": st.column_config.TextColumn("Priority", width="small"),
             "outreach_angle": st.column_config.TextColumn("Outreach angle", width="large"),
@@ -1085,6 +1116,9 @@ else:
             "net_worth": st.column_config.TextColumn("Net worth (list)", width="small"),
             "billionaire_company": st.column_config.TextColumn("List source co.", width="medium"),
             "priority": st.column_config.TextColumn("Value tag", width="medium"),
+            "repeat_person": st.column_config.CheckboxColumn("Repeat", width="small"),
+            "linked_wealth_signal": st.column_config.CheckboxColumn("Linked $", width="small"),
+            "repeat_company": st.column_config.CheckboxColumn("Co. repeat", width="small"),
         },
     )
 
@@ -1198,10 +1232,17 @@ with st.container(border=True, key="ws_details_explorer"):
                         else ("mid" if _tc == "mid" or str(_tc).lower() == "mid" else "no")
                     )
                     _ew = float(row.get("estimated_wealth") or 0)
+                    _agg = float(row.get("aggregated_estimated_wealth") or 0)
                     st.markdown(
                         f"**Wealth score:** {int(row.get('wealth_score', 0) or 0)} | "
-                        f"**Est. wealth (deal):** ${_ew:,.0f} | "
+                        f"**Est. wealth (this row):** ${_ew:,.0f} | "
+                        f"**Agg. est. (person):** ${_agg:,.0f} | "
                         f"**Target client:** {_tc_label}"
+                    )
+                    st.caption(
+                        f"Cross-article: repeat person = {bool(row.get('repeat_person'))} | "
+                        f"linked wealth signal = {bool(row.get('linked_wealth_signal'))} | "
+                        f"repeat company = {bool(row.get('repeat_company'))}"
                     )
                     st.markdown("**Why it matters**")
                     st.write(row.get("why_it_matters", ""))

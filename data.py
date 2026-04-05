@@ -21,7 +21,7 @@ import requests
 
 from ai_extraction import extract_signal_with_ai
 from person_validation import is_valid_person
-from score import apply_scores, compute_signal_score
+from score import apply_scores, clamp_score_0_100, compute_signal_score
 
 # When True, ``finalize_dataframe`` emits one row per detected person (shared headline / URL).
 SPLIT_SIGNAL_ROWS_PER_PERSON = False
@@ -56,11 +56,15 @@ REQUIRED_COLUMNS = [
     "is_relevant",
     "wealth_score",
     "estimated_wealth",
+    "aggregated_estimated_wealth",
     "target_client",
     "is_billionaire",
     "net_worth",
     "billionaire_company",
     "priority",
+    "repeat_person",
+    "linked_wealth_signal",
+    "repeat_company",
 ]
 
 # -----------------------------------------------------------------------------
@@ -225,7 +229,7 @@ def _enrich_signals_with_billionaire_list(out: pd.DataFrame) -> None:
             bc = match.get("company")
             out.at[idx, "billionaire_company"] = "" if bc is None else str(bc)
             sc = int(out.at[idx, "score"])
-            out.at[idx, "score"] = min(sc + 20, 100)
+            out.at[idx, "score"] = sc + 20
             print("Matched billionaire:", out.at[idx, "person_name"])
     out["is_billionaire"] = out["is_billionaire"].fillna(False).astype(bool)
 
@@ -254,6 +258,13 @@ def _apply_value_priority_tags(out: pd.DataFrame) -> None:
             parts.append("MID TARGET")
         if ib:
             parts.append("BILLIONAIRE LIST")
+        if "aggregated_estimated_wealth" in out.columns:
+            try:
+                agg = float(out.at[idx, "aggregated_estimated_wealth"] or 0)
+            except (TypeError, ValueError):
+                agg = 0.0
+            if agg >= 10_000_000:
+                parts.append("AGGREGATE $10M+")
         out.at[idx, "priority"] = " + ".join(parts) if parts else ""
 
 
@@ -1896,13 +1907,23 @@ def estimate_wealth_from_deal(
     return (deal * own, deal)
 
 
-def merge_target_client_row(wealth_score: int, estimated_wealth: float) -> bool | str:
+def merge_target_client_row(
+    wealth_score: int,
+    estimated_wealth: float,
+    aggregated_estimated_wealth: float = 0.0,
+) -> bool | str:
     """
     Combine rule-based ``wealth_score`` with deal-based ``estimated_wealth``.
+
+    When the same person has multiple rows, ``aggregated_estimated_wealth`` is the sum of
+    per-row estimates (e.g. exit + separate funding) — ``>= $10M`` → primary target.
 
     Deal path: ``>= $5M`` personal estimate → primary target; ``$1M–$5M`` → ``\"mid\"``;
     ``wealth_score >= 50`` still marks a primary target.
     """
+    agg = float(aggregated_estimated_wealth)
+    if agg >= 10_000_000:
+        return True
     w = int(wealth_score) >= 50
     ew = float(estimated_wealth)
     if ew >= 5_000_000:
@@ -1912,6 +1933,170 @@ def merge_target_client_row(wealth_score: int, estimated_wealth: float) -> bool 
     if ew >= 1_000_000:
         return "mid"
     return False
+
+
+def normalize_name(name: str) -> str:
+    """Stable key for cross-article person matching (lowercase, collapsed whitespace)."""
+    s = (name or "").strip().lower()
+    if not s:
+        return ""
+    return re.sub(r"\s+", " ", s)
+
+
+def assign_aggregated_estimated_wealth(out: pd.DataFrame) -> None:
+    """Set ``aggregated_estimated_wealth`` to the sum of ``estimated_wealth`` per normalized person."""
+    if out.empty:
+        return
+    out["aggregated_estimated_wealth"] = 0.0
+    person_index: dict[str, list[Any]] = {}
+    for idx in out.index:
+        nm = normalize_name(str(out.at[idx, "person_name"] or ""))
+        if not nm:
+            continue
+        person_index.setdefault(nm, []).append(idx)
+    for _nm, idxs in person_index.items():
+        total = sum(float(out.at[i, "estimated_wealth"] or 0) for i in idxs)
+        for idx in idxs:
+            out.at[idx, "aggregated_estimated_wealth"] = total
+
+
+def _row_has_funding_signal(row: pd.Series) -> bool:
+    if str(row.get("event_type", "") or "").strip() == "Funding":
+        return True
+    fa = str(row.get("funding_amount", "") or "").strip()
+    v = _parse_single_funding_token_to_usd(fa)
+    if v is not None and v > 0:
+        return True
+    if str(row.get("funding_stage", "") or "").strip():
+        return True
+    return False
+
+
+def _row_has_acquisition_signal(row: pd.Series) -> bool:
+    if str(row.get("event_type", "") or "").strip() == "Founder Exit":
+        return True
+    blob = f"{row.get('raw_title', '')} {row.get('full_explanation', '')}".lower()
+    return bool(re.search(r"\b(acquisition|acquired|acquires|buyout|merger)\b", blob))
+
+
+def _row_has_deal_value_signal(row: pd.Series) -> bool:
+    try:
+        ew = float(row.get("estimated_wealth") or 0)
+    except (TypeError, ValueError):
+        ew = 0.0
+    if ew > 0:
+        return True
+    dv = extract_deal_value_usd(
+        str(row.get("raw_title", "")),
+        str(row.get("full_explanation", "")),
+    )
+    return dv > 0
+
+
+def _row_has_linked_wealth_signal(row: pd.Series) -> bool:
+    """Funding, M&A-style acquisition, or parsed headline deal value."""
+    return (
+        _row_has_funding_signal(row)
+        or _row_has_acquisition_signal(row)
+        or _row_has_deal_value_signal(row)
+    )
+
+
+def apply_cross_article_enrichment(out: pd.DataFrame) -> None:
+    """
+    Index rows by ``normalize_name(person_name)``; boost score when the same person
+    appears in multiple signals or when any row carries funding / acquisition / deal value.
+    """
+    if out.empty:
+        return
+    out["repeat_person"] = False
+    out["linked_wealth_signal"] = False
+
+    person_index: dict[str, list[Any]] = {}
+    for idx in out.index:
+        nm = normalize_name(str(out.at[idx, "person_name"] or ""))
+        if not nm:
+            continue
+        person_index.setdefault(nm, []).append(idx)
+
+    for _name, idxs in person_index.items():
+        if len(idxs) > 1:
+            for idx in idxs:
+                out.at[idx, "repeat_person"] = True
+                out.at[idx, "score"] = int(out.at[idx, "score"]) + 10
+
+        any_link = any(_row_has_linked_wealth_signal(out.loc[i]) for i in idxs)
+        if any_link:
+            for idx in idxs:
+                out.at[idx, "linked_wealth_signal"] = True
+                out.at[idx, "score"] = int(out.at[idx, "score"]) + 20
+
+
+def _company_index_key(company_name: str) -> str:
+    """Stable key for cross-row company matching; empty if unknown or invalid."""
+    cn = str(company_name or "").strip()
+    if not cn or cn.lower() == "unknown":
+        return ""
+    if not sanitize_company_name(cn):
+        return ""
+    return _normalize_company_key(cn)
+
+
+def _peer_funding_amount_usd(funding_amount_str: str) -> float:
+    v = _parse_single_funding_token_to_usd((funding_amount_str or "").strip())
+    return v if v is not None else 0.0
+
+
+def propagate_company_funding_to_people(out: pd.DataFrame) -> None:
+    """
+    If funding is detected for a company on any row, copy the strongest peer
+    ``funding_amount`` / ``funding_stage`` onto sibling rows for that company so
+    person-level scores and wealth estimates reflect the shared deal.
+    """
+    if out.empty:
+        return
+    company_index: dict[str, list[Any]] = {}
+    for idx in out.index:
+        key = _company_index_key(str(out.at[idx, "company_name"] or ""))
+        if not key:
+            continue
+        company_index.setdefault(key, []).append(idx)
+
+    for _key, idxs in company_index.items():
+        donors = [i for i in idxs if _row_has_funding_signal(out.loc[i])]
+        if not donors:
+            continue
+        best = max(donors, key=lambda i: _peer_funding_amount_usd(str(out.at[i, "funding_amount"])))
+        best_amt = str(out.at[best, "funding_amount"] or "").strip()
+        best_stage = str(out.at[best, "funding_stage"] or "").strip()
+
+        for idx in idxs:
+            if _row_has_funding_signal(out.loc[idx]):
+                continue
+            if best_amt:
+                out.at[idx, "funding_amount"] = best_amt
+            if best_stage and not str(out.at[idx, "funding_stage"] or "").strip():
+                out.at[idx, "funding_stage"] = best_stage
+
+
+def apply_cross_company_enrichment(out: pd.DataFrame) -> None:
+    """When the same company appears on multiple rows, treat as higher importance (+10 score each)."""
+    if out.empty:
+        return
+    out["repeat_company"] = False
+    company_index: dict[str, list[Any]] = {}
+    for idx in out.index:
+        key = _company_index_key(str(out.at[idx, "company_name"] or ""))
+        if not key:
+            continue
+        company_index.setdefault(key, []).append(idx)
+
+    for _key, idxs in company_index.items():
+        if len(idxs) <= 1:
+            continue
+        for idx in idxs:
+            out.at[idx, "repeat_company"] = True
+            out.at[idx, "score"] = int(out.at[idx, "score"]) + 10
 
 
 def compute_wealth_score(
@@ -1972,20 +2157,146 @@ def compute_wealth_score(
     return ws
 
 
-# --- Banned topics: only these substring hits drop a row; everything else is scored and ranked ---
-_BANNED_TOPIC_SUBSTRINGS = (
+# --- Hard reject before extraction (RSS + finalize): spec list + legacy junk filters ---
+_INGEST_HARD_REJECT_SUBSTRINGS = (
+    # Required off-topic block (product spec)
+    "weather",
+    "northern lights",
+    "sports",
+    "pension",
+    "climate",
+    "war",
+    "crime",
+    "politics",
+    # Additional hard drops (retained)
     "cyberattack",
     "breach",
-    "war",
     "lawsuit",
     "trial",
 )
 
+# Strict relevance: at least one of (A) financial (B) career (C) transaction — checked before extraction.
+# A: $, million|billion, funding|raised, valuation
+# B: appointed|named|joins|CEO|CFO|CTO (also appoints|names: common headline verb forms)
+# C: acquired|sold|deal|merger
+_STRICT_FINANCIAL_RE = re.compile(
+    r"\$|\b(?:million|billion)\b|\b(?:funding|raised)\b|\bvaluation\b",
+    re.I,
+)
+_STRICT_CAREER_RE = re.compile(
+    r"\b(?:appointed|appoints|named|names|joins)\b|\b(?:CEO|CFO|CTO)\b",
+    re.I,
+)
+_STRICT_TRANSACTION_RE = re.compile(
+    r"\b(?:acquired|sold|deal|merger)\b",
+    re.I,
+)
+
 
 def _contains_banned_topics(text: str) -> bool:
-    """True if text should not be ingested (hard drop only)."""
+    """True if text matches a hard-reject needle (drop before extraction)."""
     t = (text or "").lower()
-    return any(s in t for s in _BANNED_TOPIC_SUBSTRINGS)
+    return any(s in t for s in _INGEST_HARD_REJECT_SUBSTRINGS)
+
+
+def _strict_relevance_patterns_match(text: str) -> bool:
+    """At least one financial, career, or transaction signal (see product spec)."""
+    t = text or ""
+    if not t.strip():
+        return False
+    return bool(
+        _STRICT_FINANCIAL_RE.search(t)
+        or _STRICT_CAREER_RE.search(t)
+        or _STRICT_TRANSACTION_RE.search(t)
+    )
+
+
+def source_quality_tier(url: str) -> int:
+    """
+    1 = high-trust business (looser signal bar), 2 = medium, 3 = general news (strictest), 0 = unknown.
+
+    Unknown hosts default to tier-2 behavior in ``_article_allowed_for_ingest``.
+    """
+    if not (url or "").strip():
+        return 0
+    try:
+        host = urlparse(str(url).strip()).netloc.lower()
+    except Exception:
+        host = ""
+    if not host:
+        host = str(url).lower().split("/")[0]
+    if host.startswith("www."):
+        host = host[4:]
+
+    def _ends(h: str, *suffixes: str) -> bool:
+        return any(h == s or h.endswith("." + s) for s in suffixes)
+
+    # Tier 1 — TechCrunch, Reuters, Bloomberg
+    if _ends(host, "techcrunch.com", "reuters.com", "bloomberg.com"):
+        return 1
+
+    # Tier 2 — CNBC, BBC Business, NYTimes Business (incl. ``feeds.bbci.co.uk``)
+    if _ends(host, "cnbc.com", "nytimes.com") or _ends(host, "bbc.com"):
+        return 2
+    if "bbc.co.uk" in host or "bbci.co.uk" in host:
+        return 2
+
+    # Tier 3 — CNN / NBC general
+    if _ends(host, "cnn.com", "nbcnews.com", "nbc.com", "msnbc.com"):
+        return 3
+
+    return 0
+
+
+def _signal_strong_money_or_deal(text: str) -> bool:
+    """Financial (money) or transaction (deal) pattern — required for tier-3 sources."""
+    t = text or ""
+    return bool(_STRICT_FINANCIAL_RE.search(t) or _STRICT_TRANSACTION_RE.search(t))
+
+
+_CAREER_MEDIUM_HEADLINE_RE = re.compile(
+    r"\b(?:CEO|CFO|CTO|appointed|appoints|named|names)\b",
+    re.I,
+)
+
+
+def _signal_medium_for_source_tier(text: str) -> bool:
+    """
+    Strong (money/deal) OR career with clear executive / appointment wording.
+    Stricter than bare ``joins``-only matches (tier-2 sources).
+    """
+    if _signal_strong_money_or_deal(text):
+        return True
+    t = text or ""
+    if not _STRICT_CAREER_RE.search(t):
+        return False
+    return bool(_CAREER_MEDIUM_HEADLINE_RE.search(t))
+
+
+def _article_allowed_for_ingest(text: str, source_url: str = "") -> bool:
+    """
+    Hard reject + baseline strict relevance, then source-tier bar:
+
+    - Tier 1: allow baseline (weaker career-only stories OK).
+    - Tier 2: require medium signal (money/deal OR executive appointment-class career).
+    - Tier 3: require strong money-or-deal signal only.
+    - Unknown host: tier-2 rule (medium).
+    """
+    if _contains_banned_topics(text):
+        return False
+    if not _strict_relevance_patterns_match(text):
+        return False
+
+    tier = source_quality_tier(source_url)
+    if tier == 0:
+        tier = 2
+    if tier == 1:
+        return True
+    if tier == 2:
+        return _signal_medium_for_source_tier(text)
+    if tier == 3:
+        return _signal_strong_money_or_deal(text)
+    return True
 
 _SOFT_ACTION_RE = re.compile(
     r"\b(?:"
@@ -2203,15 +2514,17 @@ def _is_relevant_signal(
     company_name: str = "",
     person_name: str = "",
     legacy_event_type: str | None = None,
+    source_url: str = "",
 ) -> bool:
     """
-    Row is kept unless the headline/body text matches a banned topic.
+    Row is kept only if it passes the ingest gate: hard-reject topics, baseline relevance,
+    and ``source_url`` tier rules (see ``source_quality_tier`` / ``_article_allowed_for_ingest``).
 
     Thin metadata (missing person, Other, Unknown company) is handled via ``score`` penalties,
-    not row deletion.
+    not row deletion — but rows with no relevance signals are dropped here.
     """
     del company_name, person_name, legacy_event_type
-    return not _contains_banned_topics(text_blob)
+    return _article_allowed_for_ingest(text_blob, source_url=source_url)
 
 
 def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -2227,21 +2540,27 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     - Parses event_date to datetime (invalid -> NaT)
     - Sets detected_at (when the row was ingested); missing values become “now”
     - Fills empty why_it_matters using why_it_matters_for_event_type
-    - Re-applies scores from score.py, then adds enrichment bonuses (company stage / industry,
-      funding deal size from ``funding_amount``)
+    - Re-applies additive ``score`` from ``score.py`` (funding / deal / executive / person / company
+      weights and penalties; uncapped), then billionaire (+20), cross-article (+10/+20), repeat-company (+10),
+      then **single** clamp to 0–100
     - Enriches ``industry``, ``stage``, ``company_description``, ``company_location`` via
       ``enrich_company_data`` (mock + article fallback)
     - Sets ``funding_amount`` / ``funding_stage`` from article text via ``extract_funding_fields_from_text``
     - Computes ``wealth_score``, ``estimated_wealth`` (deal size × ownership), merges ``target_client``
-      (rule-based + deal tiers), boosts ``score`` for high wealth / $5M+ deal estimates, then
-      billionaire-list bonus (+20) and ``priority`` tags
+      (rule-based + deal tiers); billionaire-list +20 to ``score`` (before final clamp) and ``priority`` tags
+    - Cross-article enrichment: same normalized ``person_name`` → ``repeat_person`` (+10 when 2+ rows);
+      shared ``linked_wealth_signal`` (+20 on all rows for that person when any row has funding,
+      acquisition, or deal value); same normalized ``company_name`` on 2+ rows → ``repeat_company`` (+10);
+      company-level funding is copied to sibling rows before scoring so each person inherits the deal;
+      ``aggregated_estimated_wealth`` sums per-row deal estimates by person — at **$10M+** marks target client
     - Fills outreach_angle, priority_level, suggested_next_step (action layer)
     - Recomputes quality_score (0-8) and confidence_score (0-100) from final fields
     - Dedupes across sources by person+company+event (or by raw_title when person is missing),
       keeping the highest score
     - Drops duplicate source_url rows, keeping the highest confidence / score first
-    - Drops rows whose text matches banned topics only (see ``_BANNED_TOPIC_SUBSTRINGS``); thin
-      metadata is scored, not deleted
+    - Drops rows that fail ingest hard-reject, strict relevance, or source-quality tier rules
+      (see ``source_quality_tier`` / ``_article_allowed_for_ingest``); thin metadata is scored for rows
+      that pass the gate
     """
     if df is None or df.empty:
         out = pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -2302,6 +2621,7 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 str(r.get("company_name", "")),
                 str(r.get("person_name", "")),
                 legacy_event_type=str(r.get("event_type", "") or "").strip() or None,
+                source_url=str(r.get("source_url", "") or ""),
             ),
             axis=1,
         )
@@ -2324,34 +2644,24 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         pass
     out.loc[missing_detected, "detected_at"] = _now
 
-    # --- Scores always follow score.py rules for the current event_type ---
+    if not out.empty:
+        propagate_company_funding_to_people(out)
+
+    # --- Scores: additive model (score.py); uncapped until final clamp below ---
     out["score"] = out.apply(
         lambda row: compute_signal_score(
             str(row.get("event_type", "")),
             str(row.get("person_name", "")),
             str(row.get("company_name", "")),
             str(row.get("role", "")),
+            raw_title=str(row.get("raw_title", "")),
+            full_explanation=str(row.get("full_explanation", "")),
+            funding_amount=str(row.get("funding_amount", "")),
+            funding_stage=str(row.get("funding_stage", "")),
         ),
         axis=1,
     )
     if not out.empty:
-        out["score"] = out["score"] + out.apply(
-            lambda row: _enrichment_score_bonus(
-                str(row.get("stage", "")),
-                str(row.get("industry", "")),
-                str(row.get("company_name", "")),
-            ),
-            axis=1,
-        )
-        out["score"] = out["score"] + out.apply(
-            lambda row: (
-                _funding_deal_score_bonus(str(row.get("funding_amount", "")))
-                if _company_qualifies_for_score_boost(str(row.get("company_name", "")))
-                else 0
-            ),
-            axis=1,
-        )
-        out["score"] = out["score"].clip(0, 100).astype(int)
 
         out["wealth_score"] = out.apply(
             lambda row: compute_wealth_score(
@@ -2373,27 +2683,29 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             axis=1,
         )
         out["estimated_wealth"] = _deal_tuples.map(lambda t: float(t[0])).astype(float)
+        assign_aggregated_estimated_wealth(out)
         out["target_client"] = out.apply(
             lambda row: merge_target_client_row(
                 int(row.get("wealth_score", 0) or 0),
                 float(row.get("estimated_wealth", 0) or 0),
+                float(row.get("aggregated_estimated_wealth", 0) or 0),
             ),
             axis=1,
         )
-        _w_high = out["wealth_score"] >= 50
-        _deal_high = out["estimated_wealth"] >= 5_000_000
-        out["score"] = (
-            out["score"]
-            + _w_high.astype(int) * 30
-            + _deal_high.astype(int) * 40
-        ).clip(0, 100).astype(int)
-
         _enrich_signals_with_billionaire_list(out)
         _apply_value_priority_tags(out)
+        apply_cross_article_enrichment(out)
+        apply_cross_company_enrichment(out)
+
+        out["score"] = out["score"].map(clamp_score_0_100).astype(int)
     else:
         out["wealth_score"] = 0
         out["estimated_wealth"] = 0.0
+        out["aggregated_estimated_wealth"] = 0.0
         out["target_client"] = False
+        out["repeat_person"] = False
+        out["linked_wealth_signal"] = False
+        out["repeat_company"] = False
 
     # --- Action layer: who to prioritize and what to say (derived from score + event_type) ---
     out["outreach_angle"] = out.apply(generate_outreach_angle, axis=1)
@@ -3030,7 +3342,7 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         extraction_text = _extraction_text(article_paragraphs, title)
 
         blob_for_filter = f"{title} {summary} {article_paragraphs}".strip()
-        if _contains_banned_topics(blob_for_filter):
+        if not _article_allowed_for_ingest(blob_for_filter, source_url=link):
             continue
 
         legacy_et = _classify_event_type(extraction_text) or "Other"
@@ -3133,7 +3445,7 @@ def _raw_sample_signals() -> list[dict]:
             "additional_people": [],
             "company_name": "Meridian Bank",
             "event_type": "Board Appointment",
-            "raw_title": "Meridian Bank adds Taylor Kim as independent director to board",
+            "raw_title": "Meridian Bank named Taylor Kim independent director",
             "role": "Independent Director",
             "event_date": "2026-01-20",
             "why_it_matters": "Board roles can include cash retainers, equity, and visibility into major decisions.",
@@ -3149,7 +3461,7 @@ def _raw_sample_signals() -> list[dict]:
             "additional_people": [],
             "company_name": "Lumen Grid",
             "event_type": "Founder Exit",
-            "raw_title": "Lumen Grid founder Morgan Chen exits after strategic acquisition",
+            "raw_title": "Lumen Grid founder Morgan Chen exits after strategic deal",
             "role": "Founder",
             "event_date": "2025-12-05",
             "why_it_matters": "Second-time founders often recycle capital into new ventures or angel investing.",
@@ -3181,7 +3493,7 @@ def _raw_sample_signals() -> list[dict]:
             "additional_people": [],
             "company_name": "Harbor Freight AI",
             "event_type": "Promotion",
-            "raw_title": "Harbor Freight AI promotes Casey Nguyen to VP of Engineering",
+            "raw_title": "Harbor Freight AI named Casey Nguyen VP of Engineering",
             "role": "Director of Engineering → VP Engineering",
             "event_date": "2026-02-10",
             "why_it_matters": "VP-level promotions in tech usually reflect expanded scope and pay band.",
