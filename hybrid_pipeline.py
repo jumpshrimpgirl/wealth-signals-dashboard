@@ -1,8 +1,9 @@
 """
-Hybrid AI extraction + multi-source enrichment + entity resolution + scoring.
+Prospect pipeline orchestration: article processing, enrichment helpers, and DataFrame I/O.
 
-Does not rely on regex/NER alone: primary extraction uses an LLM when article signal is high enough;
-enrichment uses Wikipedia (free), OpenCorporates, optional PDL/FullContact via person_enrichment.
+Structured LLM extraction, signal gating, match scoring, and identity cross-check live in
+``ai_prospect_pipeline``. This module supplies ``enrich_entity`` (Wikipedia / OpenCorporates / APIs),
+``process_article_row`` / ``process_articles``, and compatibility helpers.
 """
 
 from __future__ import annotations
@@ -19,14 +20,11 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 
-from wealth_identity import apply_wealth_list_to_prospect
-
 # -----------------------------------------------------------------------------
 # Paths & caches (disk-backed; survives Streamlit reruns)
 # -----------------------------------------------------------------------------
 _CACHE_ROOT = Path(__file__).resolve().parent / ".cache" / "wealth_pipeline"
 _ENTITY_FILE = _CACHE_ROOT / "entity_enrichment.json"
-_ARTICLE_PREFIX = "article_"
 
 
 def _ensure_cache() -> None:
@@ -73,35 +71,6 @@ def _put_entity_cache(key: str, value: Any) -> None:
     c[key] = value
     _entity_cache = c
     _save_json_file(_ENTITY_FILE, c)
-
-
-def _article_cache_path(article_key: str) -> Path:
-    _ensure_cache()
-    return _CACHE_ROOT / f"{_ARTICLE_PREFIX}{article_key}.json"
-
-
-def _get_article_entities_cache(article_key: str) -> list[dict[str, Any]] | None:
-    p = _article_cache_path(article_key)
-    if not p.exists():
-        return None
-    try:
-        with open(p, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return data
-    except (json.JSONDecodeError, OSError):
-        pass
-    return None
-
-
-def _set_article_entities_cache(article_key: str, entities: list[dict[str, Any]]) -> None:
-    p = _article_cache_path(article_key)
-    _ensure_cache()
-    try:
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(entities, f, ensure_ascii=False, indent=0)
-    except OSError:
-        pass
 
 
 _SESSION = requests.Session()
@@ -152,101 +121,7 @@ def _largest_money_usd(text: str) -> tuple[float, str | None]:
 
 
 # -----------------------------------------------------------------------------
-# STEP 1 — AI entity extraction
-# -----------------------------------------------------------------------------
-_EXTRACTION_PROMPT = """You extract people from news article text for a wealth-intelligence product.
-
-Return ONE JSON object with key "entities" whose value is an ARRAY of objects. Each object MUST have:
-- "name": full name of a real human (string). Use empty string only if not a person.
-- "role": job title ONLY if explicitly tied to that person in the text; otherwise "".
-- "company": employer/company ONLY if explicitly tied; otherwise "". Never guess or invent a company.
-- "confidence": number from 0 to 1 (how sure you are this person+fields are grounded in the text).
-- "context_type": exactly one of "primary", "secondary", "mention":
-    - primary = main subject of the article
-    - secondary = important but not the core story
-    - mention = background, quote attribution, list item, or minor
-
-Rules:
-- List ALL distinct people you can ground in the text.
-- Do NOT output regions, departments, agencies, or companies as the "name".
-- Do NOT hallucinate missing companies or roles.
-
-Article:
----
-{text}
----
-"""
-
-
-def _openai_json_entities(article_text: str) -> list[dict[str, Any]] | None:
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        return None
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return None
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-    client = OpenAI(api_key=api_key)
-    prompt = _EXTRACTION_PROMPT.format(text=(article_text or "")[:24000])
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-        )
-    except Exception:
-        return None
-    raw = (response.choices[0].message.content or "").strip()
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    ents = data.get("entities")
-    if not isinstance(ents, list):
-        return None
-    out: list[dict[str, Any]] = []
-    for e in ents:
-        if not isinstance(e, dict):
-            continue
-        out.append(
-            {
-                "name": str(e.get("name") or "").strip(),
-                "role": str(e.get("role") or "").strip(),
-                "company": str(e.get("company") or "").strip(),
-                "confidence": float(e.get("confidence") or 0) if e.get("confidence") is not None else 0.0,
-                "context_type": str(e.get("context_type") or "mention").strip().lower(),
-            }
-        )
-    return out
-
-
-def extract_entities_with_ai(article_text: str) -> list[dict[str, Any]]:
-    """LLM: multiple person candidates with context_type. Returns [] if no API or failure."""
-    r = _openai_json_entities(article_text or "")
-    return r if r is not None else []
-
-
-def extract_entities_with_ai_cached(article_text: str) -> list[dict[str, Any]]:
-    key = _hash_key(article_text or "")
-    hit = _get_article_entities_cache(key)
-    if hit is not None:
-        return hit
-    raw = _openai_json_entities(article_text or "")
-    if raw is None:
-        # Missing key / API error — do not cache so a later run can succeed.
-        return []
-    _set_article_entities_cache(key, raw)
-    return raw
-
-
-# -----------------------------------------------------------------------------
-# STEP 2 — Hard filter (non-humans / garbage)
+# Hard filter (non-humans / garbage) — broad recall; AI marks junk via roles/scores
 # -----------------------------------------------------------------------------
 _BAD_NAME_SUBSTR = frozenset(
     {
@@ -673,69 +548,6 @@ def score_match(
     return s, reasons
 
 
-# -----------------------------------------------------------------------------
-# STEP 6 — Article-level signal (0–60, capped)
-# -----------------------------------------------------------------------------
-def score_article_signal(text: str) -> tuple[int, list[str]]:
-    """Funding / M&A / revenue / size tiers. Recency is handled only in sorting, not points."""
-    t = (text or "").lower()
-    reasons: list[str] = []
-    pts = 0
-
-    if any(
-        k in t
-        for k in (
-            "raised",
-            "raising",
-            "funding",
-            "series a",
-            "series b",
-            "series c",
-            "series d",
-            "venture",
-            "round",
-            "investment",
-        )
-    ):
-        pts += 30
-        reasons.append("+30 funding")
-
-    if any(
-        k in t
-        for k in (
-            "acquisition",
-            "merger",
-            "acquire",
-            "acquired",
-            "sale of",
-            "stake sale",
-            "ipo",
-            "go public",
-            "buyout",
-            "exit",
-        )
-    ):
-        pts += 30
-        reasons.append("+30 m&a/exit/ipo")
-
-    if any(k in t for k in ("revenue", "growth", "profit", "valuation", "earnings")):
-        pts += 20
-        reasons.append("+20 revenue/growth/valuation")
-
-    max_usd, _ = _largest_money_usd(text or "")
-    if max_usd >= 1e9:
-        pts += 30
-        reasons.append("+30 $1B+")
-    elif max_usd >= 1e8:
-        pts += 20
-        reasons.append("+20 $100M+")
-
-    capped = min(60, pts)
-    if capped < pts:
-        reasons.append(f"cap 60 (was {pts})")
-    return capped, reasons
-
-
 def estimate_wealth_from_context(summary: str, role: str) -> str:
     max_usd, disp = _largest_money_usd(summary or "")
     if disp:
@@ -820,71 +632,128 @@ def _dedupe_within_article(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    Expand one raw article row into zero or more prospect dicts (clean + legacy keys).
-    AI extraction runs only when rule-based signal_score >= 30.
+    AI-first pipeline: article signal → (optional) structured LLM candidates →
+    cross-check identity → match score → priority. Broad recall: one row per candidate.
     """
+    from ai_prospect_pipeline import (
+        build_processed_row_core,
+        compute_match_score,
+        compute_wealth_status,
+        cross_check_identity_and_wealth,
+        extract_candidates_with_ai_cached,
+        heuristic_candidates_from_row,
+        priority_label_from_priority_score,
+        score_article_signal,
+        select_primary_actor,
+    )
+    from two_pass_pipeline import compute_recency_score, pass1_recency_adjustment
+
     summary = _text_blob(row)
-    sig, sig_r = score_article_signal(summary)
-
-    if sig >= 30:
-        entities = extract_entities_with_ai_cached(summary)
-        if not entities:
-            entities = _fallback_entities_from_row(row)
-    else:
-        entities = _fallback_entities_from_row(row)
-
-    entities = [e for e in entities if hard_filter_entity(e)]
-    if not entities:
-        return []
-
     source_title = str(row.get("raw_title") or row.get("source_title") or "").strip()
     source_url = str(row.get("source_url") or "").strip()
-    detected_at = row.get("detected_at")
+    published_at = row.get("detected_at") or row.get("event_date")
     recency = _recency_ts(row)
 
+    sig = score_article_signal(summary, source_title, published_at)
+    sig_r = sig.get("_debug_reasons") or []
+    gate = int(sig.get("signal_score") or 0) >= 25 or bool(sig.get("economic_relevance"))
+
+    ai_payload: dict[str, Any] | None = None
+    if gate:
+        ai_payload = extract_candidates_with_ai_cached(
+            summary, source_title, source_url=source_url
+        )
+    if not ai_payload or not ai_payload.get("candidates"):
+        ai_payload = heuristic_candidates_from_row(row, summary)
+
+    candidates = [c for c in (ai_payload.get("candidates") or []) if isinstance(c, dict)]
+    if not candidates:
+        return []
+
+    _primary, weak_primary = select_primary_actor(candidates, sig)
+
     out: list[dict[str, Any]] = []
+    for c in candidates:
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        if not hard_filter_entity(
+            {
+                "name": name,
+                "role": c.get("role"),
+                "company": c.get("company"),
+            }
+        ):
+            continue
+        if c.get("is_real_person") is False:
+            continue
 
-    for e in entities:
-        # Wikipedia / APIs are cached per person; AI extraction is gated above.
-        enriched = enrich_entity(e)
-        resolved = resolve_identity(e, enriched)
-        msc, m_r = score_match(resolved, summary, enriched)
-        prio = normalize_priority_score(sig, msc)
+        role_a = str(c.get("role") or "").strip()
+        co_a = str(c.get("company") or "").strip()
+        cc = cross_check_identity_and_wealth(name, co_a, role_a, article_summary=summary)
+        msc, m_r = compute_match_score(c, cc)
 
-        label = priority_label_from_score(prio)
+        pr_adj = pass1_recency_adjustment(published_at)
+        prio = int(sig.get("signal_score") or 0) + int(msc) + pr_adj
+        if weak_primary:
+            prio = min(prio, 74)
+        prio = max(0, min(100, prio))
+        label = priority_label_from_priority_score(prio)
+        if weak_primary and label in ("Elite", "High"):
+            label = "Medium"
+
+        est = str(cc.get("est_wealth") or "").strip()
+        if not est:
+            est = estimate_wealth_from_context(summary, cc.get("canonical_role") or role_a)
+
+        core = build_processed_row_core(
+            name=str(cc.get("canonical_name") or name).strip(),
+            role=str(cc.get("canonical_role") or role_a).strip(),
+            company=str(cc.get("canonical_company") or co_a).strip(),
+            signal_type=str(sig.get("signal_type") or "Other"),
+            signal_score=int(sig.get("signal_score") or 0),
+            match_score=msc,
+            priority_label=label,
+            est_wealth=est,
+            source_title=source_title,
+            source_url=source_url,
+            summary=summary,
+            context_type=str(c.get("context_type") or "mention"),
+            economic_role=str(c.get("economic_role") or "other"),
+            identity_confidence=float(cc.get("identity_confidence") or 0.0),
+            verification_sources_used=list(cc.get("verification_sources_used") or []),
+            priority_score=prio,
+        )
 
         clean = {
-            "name": resolved["name"],
-            "role": resolved["role"],
-            "company": resolved["company"],
-            "priority_score": prio,
-            "signal_score": sig,
-            "match_score": msc,
-            "est_wealth": estimate_wealth_from_context(summary, resolved["role"]),
+            **core,
             "source": source_url or source_title,
-            "summary": summary,
             "_recency_ts": recency,
-            "_debug_signal_reasons": "; ".join(sig_r),
+            "_debug_signal_reasons": "; ".join(str(x) for x in sig_r),
             "_debug_match_reasons": "; ".join(m_r),
         }
 
+        wstat = compute_wealth_status(cc, summary, str(c.get("economic_role") or ""))
         legacy = {
             **row,
             **clean,
-            "person_name": resolved["name"],
-            "company_name": resolved["company"],
+            "person_name": core["name"],
+            "company_name": core["company"],
             "raw_title": source_title,
-            "score": prio,
-            "priority_level": label,
-            "priority_label": label,
-            "est_wealth_display": clean["est_wealth"],
-            "signal_type": row.get("event_type") or row.get("wealth_signal_label") or "Other",
+            "score": core["priority_score"],
+            "priority_level": core["priority_label"],
+            "est_wealth_display": core["est_wealth"],
+            "signal_type": core["signal_type"],
             "source_title": source_title,
             "source_url": source_url,
+            "published_at": published_at,
+            "recency_score": compute_recency_score(published_at),
+            "wealth_status": wstat,
+            "wealth_relevance": str(c.get("wealth_relevance") or "medium"),
+            "article_relevance_reason": str(c.get("article_relevance_reason") or ""),
             "debug_signal_reasons": clean["_debug_signal_reasons"],
             "debug_match_reasons": clean["_debug_match_reasons"],
         }
-        # Drop noisy / deprecated columns from display pipeline (keep if missing)
         for drop_k in (
             "ai_fa_usefulness_score",
             "prospect_quality",
@@ -896,7 +765,6 @@ def process_article_row(row: dict[str, Any]) -> list[dict[str, Any]]:
                 except KeyError:
                     pass
 
-        apply_wealth_list_to_prospect(legacy)
         out.append(legacy)
 
     return _dedupe_within_article(out)
@@ -934,16 +802,19 @@ def process_articles(raw_articles: pd.DataFrame | list[dict[str, Any]]) -> list[
 
 
 def to_clean_dataframe(processed: list[dict[str, Any]]) -> pd.DataFrame:
-    """Narrow columns for export / inspection."""
+    """Narrow columns for export / inspection (aligned with AI pipeline output)."""
     cols = (
         "name",
         "role",
         "company",
-        "priority_score",
+        "signal_type",
         "signal_score",
         "match_score",
+        "priority_score",
+        "priority_label",
         "est_wealth",
-        "source",
+        "source_title",
+        "source_url",
         "summary",
     )
     rows = []

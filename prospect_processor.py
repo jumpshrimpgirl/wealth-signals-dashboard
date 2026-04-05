@@ -9,28 +9,29 @@ from __future__ import annotations
 
 import pandas as pd
 
+from ai_prospect_pipeline import score_article_signal
 from hybrid_pipeline import (
     estimate_wealth_from_context as estimate_wealth,
     priority_label_from_score,
     process_articles,
-    score_article_signal,
     score_match,
     to_clean_dataframe,
 )
+from two_pass_pipeline import apply_pass2_home_rerank
 
 
 def process_and_rank_prospects(raw_rows: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform raw article rows into ranked prospect rows (multiple prospects per article possible).
+    Pass 1: broad recall (``process_articles``). Pass 2: strict Home re-rank on top ~30 rows.
 
-    Output preserves legacy dashboard columns via per-row merge; core scores are
-    ``signal_score``, ``match_score``, and ``priority_score`` (0–100).
+    Explore / table: ``priority_score`` (Pass 1). Home: ``top5_score`` / ``keep_for_home``.
     """
     if raw_rows is None or raw_rows.empty:
         return raw_rows
 
     processed = process_articles(raw_rows)
-    return pd.DataFrame(processed)
+    df = pd.DataFrame(processed)
+    return apply_pass2_home_rerank(df, pool_size=30)
 
 
 __all__ = [

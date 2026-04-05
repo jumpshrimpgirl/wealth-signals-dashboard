@@ -22,6 +22,7 @@ from data import fetch_signals, format_wealth
 from person_validation import is_valid_person
 from prospect_processor import process_and_rank_prospects
 from settings import SLACK_WEBHOOK_URL
+from two_pass_pipeline import build_home_top_view
 
 _log = logging.getLogger(__name__)
 
@@ -156,6 +157,7 @@ SEARCHABLE_COLUMNS = (
     "raw_title",
     "role",
     "summary",
+    "wealth_status",
     "priority_score",
     "priority_label",
     "signal_type",
@@ -1066,14 +1068,30 @@ def lookup_home_row_for_ai(df: pd.DataFrame, item: dict) -> pd.Series | None:
 
 
 def render_home_signal_card(row: pd.Series) -> None:
-    """Rich card for Home tab (badges, links, AI lines when present)."""
+    """Rich card for Home tab (Pass-2 Home score when available)."""
     header_line = format_signal_header_line(row)
     hl = html.escape(header_line)
-    _line = str(row.get("ai_summary", "") or "").strip() or str(row.get("outreach_angle", "") or "")
+    _line = str(row.get("ai_summary", "") or "").strip() or str(row.get("summary", "") or "")[:220]
     out_e = html.escape(_line)
     new_html = new_pill_html() if is_signal_new(row.get("detected_at")) else ""
     ago = human_time_ago(row.get("detected_at"))
     href = safe_href(str(row.get("source_url", "")))
+    _sig_t = str(row.get("signal_type") or row.get("event_type") or "").strip()
+    _co_disp = str(row.get("company_name") or row.get("company") or "").strip()
+    _ew = str(row.get("est_wealth_display") or row.get("est_wealth") or "").strip()
+    _tplab = row.get("top5_score")
+    try:
+        _has_top5 = _tplab is not None and not pd.isna(_tplab)
+    except Exception:
+        _has_top5 = bool(_tplab)
+    if _has_top5:
+        _ps = int(pd.to_numeric(_tplab, errors="coerce") or 0)
+        _plab = str(row.get("home_priority_label") or row.get("priority_label") or "").strip()
+        _score_note = "Home"
+    else:
+        _ps = int(pd.to_numeric(row.get("priority_score", row.get("score")), errors="coerce") or 0)
+        _plab = str(row.get("priority_label") or row.get("priority_level") or "").strip()
+        _score_note = "Priority"
     with st.container(border=True):
         c1, c2 = st.columns([3, 1])
         with c1:
@@ -1081,10 +1099,15 @@ def render_home_signal_card(row: pd.Series) -> None:
                 f"""<p class="ws-card-line"><strong>{hl}</strong>{target_client_badge_html(row)}{billionaire_badge_html(row)}{new_html}</p>""",
                 unsafe_allow_html=True,
             )
-            _plab = str(row.get("priority_label") or row.get("priority_level") or "").strip()
-            _ps = int(pd.to_numeric(row.get("priority_score", row.get("score")), errors="coerce") or 0)
+            _co_html = html.escape(_co_disp) if _co_disp else "—"
+            _ew_html = html.escape(_ew) if _ew else "—"
             st.markdown(
-                f"""<p class="ws-card-line">{event_type_badge_html(row.get("event_type", ""))} {priority_badge_html(_plab)} | Priority: {_ps} | {out_e}</p>""",
+                f"""<p class="ws-card-line">{event_type_badge_html(_sig_t)} {priority_badge_html(_plab)} | """
+                f"""{_score_note}: {_ps} | {_co_html} | Wealth: {_ew_html}</p>""",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""<p class="ws-card-line" style="font-size:0.9rem;color:#9CA3AF;">{out_e}</p>""",
                 unsafe_allow_html=True,
             )
             st.markdown(
@@ -1208,6 +1231,16 @@ ensure_columns_present(
         "ingest_overall_extraction_confidence",
         "prospect_bio",
         "engine_pipeline_score",
+        "published_at",
+        "recency_score",
+        "wealth_status",
+        "wealth_relevance",
+        "article_relevance_reason",
+        "top5_score",
+        "top5_reason",
+        "keep_for_home",
+        "home_priority_label",
+        "pass2_ai_subscore",
     ],
 )
 
@@ -1483,6 +1516,16 @@ ensure_columns_present(
         "ingest_overall_extraction_confidence",
         "prospect_bio",
         "engine_pipeline_score",
+        "published_at",
+        "recency_score",
+        "wealth_status",
+        "wealth_relevance",
+        "article_relevance_reason",
+        "top5_score",
+        "top5_reason",
+        "keep_for_home",
+        "home_priority_label",
+        "pass2_ai_subscore",
     ],
 )
 
@@ -1571,8 +1614,8 @@ with tab_home:
                 st.session_state.signals_df = _load_signals_df()
                 st.rerun()
         st.caption(
-            f"Top **{HOME_TOP_SIGNALS}** by **priority score** (signal × match quality) after your sidebar filters — "
-            "not raw NER or legacy AI rerank."
+            f"Top **{HOME_TOP_SIGNALS}** use **Pass-2 Home ranking** (strict AI + recency + verification) on the top pool "
+            "from Pass-1 scores — not the same ordering as the full table."
         )
 
         if len(signals_df) == 0:
@@ -1585,7 +1628,7 @@ with tab_home:
                 "Lower the minimum score slider or widen filters."
             )
         else:
-            top_home = explore_view.head(HOME_TOP_SIGNALS)
+            top_home = build_home_top_view(explore_view, HOME_TOP_SIGNALS)
             for _, row in top_home.iterrows():
                 render_home_signal_card(row)
     st.caption(f"Full feed, search, and row details are on the **Explore & data** tab.")
