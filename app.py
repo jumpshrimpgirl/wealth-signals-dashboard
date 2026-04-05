@@ -26,15 +26,17 @@ NEW_WINDOW_HOURS = 48
 
 
 def inject_styles() -> None:
-    """Global look: soft canvas, typography, cards, metrics, table shell, sidebar."""
+    """
+    Global look: soft canvas, typography, cards, metrics, table shell, sidebar.
+    """
     st.markdown(
-        """
+"""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
   .stApp {
     font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: linear-gradient(180deg, #f4f5f7 0%, #f0f1f4 100%) !important;
+    background: #f4f5f7 !important;
   }
 
   section.main > div {
@@ -279,11 +281,13 @@ def inject_styles() -> None:
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   }
 </style>
-        """,
+    """,
         unsafe_allow_html=True,
     )
-    Turn a timestamp into a short, human phrase (e.g. '2 hours ago', '1 day ago').
-    """
+
+
+def human_time_ago(ts) -> str:
+    """Turn a timestamp into a short, human phrase (e.g. '2 hours ago', '1 day ago')."""
     if ts is None or pd.isna(ts):
         return "-"
     t = pd.Timestamp(ts)
