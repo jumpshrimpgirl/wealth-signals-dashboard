@@ -1,5 +1,3 @@
 """Environment-backed settings for optional integrations."""
 
-import os
-
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+# Reserved for future optional keys (e.g. API URLs).

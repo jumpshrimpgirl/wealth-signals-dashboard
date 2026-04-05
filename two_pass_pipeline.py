@@ -16,6 +16,19 @@ from typing import Any
 import pandas as pd
 
 
+def _safe_int_cell(val, default: int = 0) -> int:
+    n = pd.to_numeric(val, errors="coerce")
+    try:
+        if pd.isna(n):
+            return default
+    except (TypeError, ValueError):
+        return default
+    try:
+        return int(n)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def compute_recency_score(published_at: Any) -> int:
     """
     Article age vs now. Returns roughly -40 … +20 for use in Home ranking.
@@ -217,7 +230,7 @@ def _rerank_fallback_heuristic(candidate_rows: list[dict[str, Any]]) -> list[dic
     for i, row in enumerate(candidate_rows):
         pub = row.get("published_at") or row.get("detected_at")
         rec = compute_recency_score(pub)
-        ps = int(pd.to_numeric(row.get("priority_score") or row.get("score"), errors="coerce") or 0)
+        ps = _safe_int_cell(row.get("priority_score") or row.get("score"), 0)
         vbonus = _verification_bonus(float(row.get("identity_confidence") or 0))
         ai_sum = min(60, ps * 3 // 5)
         top5 = max(0, min(100, ai_sum + rec + vbonus))
