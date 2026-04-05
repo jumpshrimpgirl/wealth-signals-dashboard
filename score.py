@@ -1,44 +1,75 @@
 """
 Scoring logic for wealth signals.
 
-Higher scores mean a stronger signal that someone may have had a meaningful
-financial or career event worth paying attention to.
+High score = actionable signal: core event type plus solid extraction (person,
+company, role) is more useful for outreach and prioritization.
+
+Low score = weak or noisy signal: thin metadata, generic “Other” bucket, or
+missing fields means less confidence the row is worth acting on.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# Base scores by event type (used when building or refreshing signal rows).
-EVENT_SCORES = {
-    "Founder Exit": 92,  # 90+ range per product spec
+# Base points by event type (before extraction bonuses / Other penalty).
+EVENT_BASE_SCORES: dict[str, int] = {
+    "Founder Exit": 90,
     "Funding": 80,
     "Promotion": 70,
     "Board Appointment": 65,
-    "Other": 55,  # Broad finance/career headlines that did not match core categories
+    "Other": 50,
 }
+
+
+def compute_signal_score(
+    event_type: str,
+    person_name: str = "",
+    company_name: str = "",
+    role: str = "",
+) -> int:
+    """
+    Combined score: event-type base + data-quality adjustments, capped at 100.
+
+    Adjustments: +20 person, +15 real company, +10 role, -15 when type is Other.
+    """
+    et = (event_type or "").strip()
+    base = EVENT_BASE_SCORES.get(et, 50)
+
+    score = base
+    if str(person_name or "").strip():
+        score += 20
+    cn = str(company_name or "").strip()
+    if cn and cn != "Unknown":
+        score += 15
+    if str(role or "").strip():
+        score += 10
+    if et == "Other":
+        score -= 15
+
+    return max(0, min(100, score))
 
 
 def score_for_event_type(event_type: str) -> int:
     """
-    Return the canonical score for a given event type.
-
-    Unknown types default to a moderate score so the dashboard still works
-    if you add new categories later.
+    Type-only score (no person/company/role). Same bases as compute_signal_score
+    with no extraction bonuses—useful when row fields are not available yet.
     """
-    if event_type not in EVENT_SCORES:
-        return 50
-    return EVENT_SCORES[event_type]
+    return compute_signal_score(event_type, "", "", "")
 
 
 def apply_scores(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Given a list of signal dicts (each must include 'event_type'),
-    attach or overwrite 'score' using the scoring rules.
+    Attach or overwrite 'score' using event_type plus extraction fields when present.
     """
     out = []
     for row in signals:
         row = dict(row)
-        row["score"] = score_for_event_type(row["event_type"])
+        row["score"] = compute_signal_score(
+            str(row.get("event_type", "") or ""),
+            str(row.get("person_name", "") or ""),
+            str(row.get("company_name", "") or ""),
+            str(row.get("role", "") or ""),
+        )
         out.append(row)
     return out

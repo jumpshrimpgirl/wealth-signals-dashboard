@@ -850,33 +850,101 @@ def _parse_entry_date(entry: Any) -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+# --- Person name extraction (conservative; empty string unless confident) ---
+_PERSON_NAME_PAIR = re.compile(r"\b([A-Z][a-z]+) ([A-Z][a-z]+)\b")
+_NAME_CONTEXT_KEYWORDS = re.compile(
+    r"\b(?:appointed|appoints|joins|joining|named|names|promoted|promotes|promotion|ceo|cfo|cto|coo|founder|co-founder)\b",
+    re.IGNORECASE,
+)
+_BLOCKED_NAME_TOKENS = frozenset(
+    {
+        "london",
+        "paris",
+        "berlin",
+        "tokyo",
+        "beijing",
+        "shanghai",
+        "mumbai",
+        "sydney",
+        "dublin",
+        "moscow",
+        "china",
+        "india",
+        "japan",
+        "france",
+        "germany",
+        "canada",
+        "australia",
+        "inc",
+        "corp",
+        "llc",
+        "ltd",
+        "plc",
+        "tech",
+        "ai",
+        "news",
+        "media",
+        "markets",
+        "street",
+        "journal",
+        "review",
+        "us",
+        "uk",
+        "eu",
+        "nyse",
+        "nasdaq",
+        "new",
+        "san",
+        "los",
+        "las",
+        "hong",
+    }
+)
+_BLOCKED_NAME_PHRASES = frozenset(
+    {
+        "new york",
+        "los angeles",
+        "san francisco",
+        "las vegas",
+        "hong kong",
+        "tel aviv",
+        "washington dc",
+    }
+)
+
+
 def _guess_person_name(title: str) -> str:
     """
-    Very light extraction - many headlines won't match; that's OK (empty string).
-    Looks for patterns like "Jane Doe joins ..." or "... names Jane Doe CEO".
-    Conservative: require exactly two capitalized words for names.
+    Extract "Firstname Lastname" only when the headline supports it.
+
+    Rules: two Title Case words (not ALL CAPS), not city/company noise, and a
+    career keyword (appointed, joins, named, promoted, CEO, founder, …) near the span.
+    Otherwise return "" (do not invent names).
     """
-    # "First Last joins|appointed|named|promoted"
-    m = re.search(
-        r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s+(?:joins|appointed|named|promoted)\b",
-        title,
-    )
-    if m:
-        return m.group(1).strip()
+    if not title or not str(title).strip():
+        return ""
 
-    # "Company names Jane Doe as ..."
-    m = re.search(
-        r"\b(?:names|names\s+as)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)\b",
-        title,
-        re.I,
-    )
-    if m:
-        return m.group(1).strip()
+    t = str(title).strip()
+    letters = [c for c in t if c.isalpha()]
+    if letters and sum(1 for c in letters if c.isupper()) / len(letters) > 0.72:
+        return ""
 
-    # Two capitalized words at the very start (often a person in press titles)
-    m = re.match(r"^([A-Z][a-z]+\s+[A-Z][a-z]+)\b", title.strip())
-    if m and not title.lower().startswith(("the ", "a ", "an ")):
-        return m.group(1).strip()
+    for m in _PERSON_NAME_PAIR.finditer(t):
+        first, last = m.group(1), m.group(2)
+        a, b = first.lower(), last.lower()
+        if a in _BLOCKED_NAME_TOKENS or b in _BLOCKED_NAME_TOKENS:
+            continue
+        if f"{a} {b}" in _BLOCKED_NAME_PHRASES:
+            continue
+
+        start, end = m.span()
+        lo = max(0, start - 72)
+        hi = min(len(t), end + 72)
+        window = t[lo:hi]
+        if not _NAME_CONTEXT_KEYWORDS.search(window):
+            continue
+
+        return f"{first} {last}"
 
     return ""
 
