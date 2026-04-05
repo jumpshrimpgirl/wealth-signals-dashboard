@@ -6,7 +6,9 @@ Uses public RSS feeds only - no LinkedIn or private sources.
 
 from __future__ import annotations
 
+import hashlib
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -35,6 +37,7 @@ REQUIRED_COLUMNS = [
     "source_url",
     "full_explanation",
     "quality_score",
+    "confidence_score",
 ]
 
 # -----------------------------------------------------------------------------
@@ -64,82 +67,437 @@ REQUEST_HEADERS = {
 REQUEST_TIMEOUT_SEC = 20
 
 
-def outreach_angle_for_event_type(event_type: str) -> str:
-    """
-    One-line conversation starter tailored to the event type (for demos / outreach planning).
-    """
-    et = (event_type or "").strip()
-    angles = {
-        "Founder Exit": "Congrats on exit - discuss liquidity and tax strategy",
-        "Funding": "Congrats on raise - planning for future liquidity",
-        "Promotion": "New role -> comp and tax optimization",
-        "Board Appointment": "New board role -> expanding financial complexity",
-        "Other": "Broad finance or career headline - lead with context and curiosity",
-    }
-    return angles.get(et, "Acknowledge the news - offer relevant planning context.")
+class _OutreachCtx:
+    """Normalized fields for outreach one-liners (deterministic templates)."""
+
+    __slots__ = ("person", "company", "role", "raw_title", "headline", "event_type", "source_url")
+
+    def __init__(
+        self,
+        person: str,
+        company: str,
+        role: str,
+        raw_title: str,
+        event_type: str,
+        source_url: str,
+    ) -> None:
+        self.person = (person or "").strip()
+        self.company = (company or "").strip()
+        self.role = (role or "").strip()
+        self.raw_title = (raw_title or "").strip()
+        self.headline = _short_headline(self.raw_title)
+        self.event_type = (event_type or "").strip()
+        self.source_url = (source_url or "").strip()
+
+    @property
+    def has_person(self) -> bool:
+        return bool(self.person)
+
+    @property
+    def has_company(self) -> bool:
+        return bool(self.company) and self.company != "Unknown"
+
+    @property
+    def has_role(self) -> bool:
+        return bool(self.role)
+
+    @property
+    def has_headline(self) -> bool:
+        return bool(self.headline)
+
+
+def _short_headline(raw: str, max_len: int = 90) -> str:
+    t = " ".join((raw or "").split())
+    if not t:
+        return ""
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1].rstrip() + "..."
+
+
+def _stable_template_index(n: int, *parts: str) -> int:
+    """Pick a template slot from stable row content (same inputs -> same index across runs)."""
+    if n <= 0:
+        return 0
+    digest = hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+    return int(digest[:12], 16) % n
+
+
+def _funding_stage_hint(title: str) -> str:
+    """Lightweight, deterministic label from the headline (no ML)."""
+    t = (title or "").lower()
+    if "seed" in t:
+        return "seed"
+    if "series a" in t or "series-a" in t or "series a," in t:
+        return "Series A"
+    if "series b" in t or "series-b" in t:
+        return "Series B"
+    if "series c" in t or "series-c" in t:
+        return "Series C"
+    if "series d" in t or "series-d" in t:
+        return "later-stage"
+    return ""
+
+
+# --- Per-event templates: 6 variants each; deterministic pick via _stable_template_index ---
+
+
+def _fe_0(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company and c.has_role:
+        return (
+            f"Offer {c.person} ({c.role} at {c.company}) a working session on liquidity timing, "
+            f"QSBS and other basis questions, and how to diversify without forcing a product pitch."
+        )
+    if c.has_person and c.has_company:
+        return (
+            f"{c.person} at {c.company} — the months after an exit usually set tax and cash trajectories; "
+            f"propose a dated checklist instead of a generic milestone message."
+        )
+    if c.has_company:
+        return (
+            f"Exit-related news at {c.company}: ask whether founders or executives want help sequencing proceeds, "
+            f"estimates, and reinvestment—not a congratulatory opener."
+        )
+    return (
+        "Liquidity event in the headline—keep the note practical: taxes, cash, equity, and timeline, "
+        "without assuming details you do not have."
+    )
+
+
+def _fe_1(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company and c.has_role:
+        return (
+            f"Ask {c.person} how their new scope as {c.role} at {c.company} intersects with earn-outs, "
+            f"lockups, or secondary windows you can help map."
+        )
+    if c.has_person and c.has_company:
+        return (
+            f"Use {c.person} + {c.company} to anchor a note on post-exit cash and governance: "
+            f"what they optimize for in the next two quarters."
+        )
+    if c.has_company:
+        return f"If leadership at {c.company} is in transition, offer a concise read on proceeds, risk, and personal balance sheet—not hype."
+    return "Founder or executive exit—lead with questions about liquidity mechanics and tax years, not celebration."
+
+
+def _fe_2(c: _OutreachCtx) -> str:
+    if c.has_headline and (c.has_person or c.has_company):
+        subj = c.person if c.has_person else c.company
+        return f'Use the story ("{c.headline}") to ask {subj} what decision points they are facing next on the exit—not generic praise.'
+    if c.has_company:
+        return f"Tie your note to {c.company}'s exit headline: offer perspective on diversification and tax sequencing for whoever owns the outcome."
+    return "Exit context is often public before details are—stay neutral, ask what they are trying to solve this year."
+
+
+def _fe_3(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_role:
+        rest = f" at {c.company}" if c.has_company else ""
+        return f"{c.person} moved to {c.role}{rest}; ask how the exit changes their personal risk budget and liquidity needs."
+    if c.has_person:
+        return f"{c.person} — after a liquidity event, people often want a second opinion on concentration and tax; offer a structured follow-up."
+    if c.has_company:
+        return f"Reference {c.company} and ask who owns the economic outcome—then tailor wealth planning to that person's facts."
+    return "Liquidity event—avoid inventing deal terms; ask what they are weighing on tax and cash this quarter."
+
+
+def _fe_4(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company:
+        return (
+            f"Write to {c.person} at {c.company} about balancing reinvestment, charitable, and family goals after liquidity—skip the congratulatory tone."
+        )
+    if c.has_company:
+        return f"Frame {c.company}'s exit as a planning window: run through scenarios, not slogans."
+    return "Post-exit planning—name concrete deliverables (tax projection, diversification outline) if you reach out."
+
+
+def _fe_5(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company and c.has_role:
+        return (
+            f"{c.person}, {c.role} ({c.company}): anchor on how long they expect to be tied to the asset and what \"done\" looks like financially."
+        )
+    if c.has_company:
+        return f"Weak name data but a clear company ({c.company})—stay high-level: liquidity, governance, and what changed for insiders."
+    return "Sparse exit details—send a short, neutral note offering a planning lens without claiming inside knowledge."
+
+
+def _fu_0(c: _OutreachCtx) -> str:
+    stage = _funding_stage_hint(c.raw_title)
+    if c.has_person and c.has_company and c.has_role:
+        core = (
+            f"Ask {c.person} ({c.role}, {c.company}) how the round resets equity benchmarks and "
+            f"409A expectations for the team."
+        )
+        if stage:
+            return f"{core} The headline reads like {stage} financing—open with a specific question, not a generic congrats on the raise."
+        return f"{core} Open with a specific question, not a generic congrats on the raise."
+    if c.has_person and c.has_company:
+        return (
+            f"{c.person} at {c.company} — new capital usually shifts dilution and hiring grants; "
+            f"offer a tight question on what changed for insiders, not a celebration."
+        )
+    if c.has_company:
+        return (
+            f"Funding at {c.company}: lead with cap table, runway, and employee equity—not generic praise for the press release."
+        )
+    return "Funding headline—ask what moved for insiders on equity and dilution before offering advice."
+
+
+def _fu_1(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company and c.has_role:
+        return (
+            f"Connect with {c.person} on how {c.role} responsibilities at {c.company} interact with refresh grants and retention after the raise."
+        )
+    if c.has_person and c.has_company:
+        return f"{c.person} ({c.company}) — ask how they are sizing secondary liquidity or employee pools post-round."
+    if c.has_company:
+        return f"Use {c.company} to discuss valuation step-ups and whether comp bands need a refresh after new money."
+    return "Raise announced—stay specific: runway, dilution, and who got diluted, or stay neutral."
+
+
+def _fu_2(c: _OutreachCtx) -> str:
+    if c.has_headline:
+        return (
+            f'Start from the headline ("{c.headline}") and ask what milestone the financing unlocks next—product, geo, or team.'
+        )
+    if c.has_company:
+        return f"{c.company}'s financing—ask what metric or deadline the board is optimizing for before pitching planning."
+    return "Funding story without rich metadata—open with one precise question about their round, then listen."
+
+
+def _fu_3(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company:
+        return (
+            f"Offer {c.person} a concise compare on cash vs. equity emphasis at {c.company} after the new round—skip cheerleading."
+        )
+    if c.has_company:
+        return f"Reference {c.company} and ask whether founders want help communicating equity changes to employees."
+    return "New capital—neutral line: offer perspective on incentive design and tax timing if it fits their stage."
+
+
+def _fu_4(c: _OutreachCtx) -> str:
+    st = _funding_stage_hint(c.raw_title)
+    if st and c.has_company:
+        return f"{st} dynamics at {c.company}: worth asking how option pools and refresh timing were negotiated."
+    if c.has_role and c.has_company:
+        return f"As {c.role} at {c.company}, the contact may care about budget, headcount, and equity tradeoffs—meet them there."
+    return "Funding item—if facts are thin, acknowledge the signal and ask what problem they are solving with the raise."
+
+
+def _fu_5(c: _OutreachCtx) -> str:
+    return (
+        "Weak or noisy funding headline—keep the note short: confirm stage, round size if public, "
+        "and whether they want a planning touchpoint or just information."
+    )
+
+
+def _pr_0(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company and c.has_role:
+        return (
+            f"{c.person}'s move to {c.role} at {c.company} likely shifts bonus, equity, and visibility—"
+            f"offer an executive-comp sanity check, not a congratulations template."
+        )
+    if c.has_person and c.has_company:
+        return (
+            f"{c.person} at {c.company} — promotions often reset deferrals and equity vesting; ask what changed in remit and pay mix."
+        )
+    if c.has_company:
+        return f"Leadership change at {c.company}: ask how scope and compensation moved for the person in question."
+    return "Senior promotion—anchor on remit, pay structure, and equity, not generic praise."
+
+
+def _pr_1(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_role:
+        co = f" at {c.company}" if c.has_company else ""
+        return f"Ask {c.person} how the {c.role} remit{co} changes equity, cash, and time allocation they care about."
+    if c.has_person and c.has_company:
+        return f"{c.person} ({c.company}) — worth probing title change vs. material comp change before giving advice."
+    if c.has_company:
+        return f"Promotion context at {c.company}: stay factual; ask who moved and what decision rights shifted."
+    return "Career step—use a neutral hook: scope, compensation, and what success looks like in the new role."
+
+
+def _pr_2(c: _OutreachCtx) -> str:
+    if c.has_headline:
+        return (
+            f'Reference the announcement ("{c.headline}") and ask what success metrics matter in the next 12 months—then tie planning to that.'
+        )
+    if c.has_person:
+        return f"{c.person} — new level often triggers deferred comp and benefit elections; offer timing help without assuming numbers."
+    return "Promotion signal with thin fields—keep the outreach humble and question-led."
+
+
+def _pr_3(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company and c.has_role:
+        return (
+            f"Discuss with {c.person} ({c.role}, {c.company}) whether public visibility or board exposure changes their personal risk profile."
+        )
+    if c.has_company:
+        return f"At {c.company}, senior moves can affect clawbacks and good-leaver terms—ask before prescribing."
+    return "Executive move—offer a second opinion on contracts and benefits if they engage; otherwise stay light."
+
+
+def _pr_4(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company:
+        return (
+            f"Write to {c.person} about balancing visibility and family liquidity given their role at {c.company}—avoid a canned congrats line."
+        )
+    if c.has_role:
+        return f"New {c.role} title—ask what resources and constraints come with it before discussing wealth tactics."
+    return "Promotion headline—neutral outreach: confirm the move, then ask what they want to optimize."
+
+
+def _pr_5(c: _OutreachCtx) -> str:
+    return (
+        "Sparse promotion details—use a short note offering perspective on comp, equity, and tax elections without inventing titles."
+    )
+
+
+def _bd_0(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company and c.has_role:
+        return (
+            f"Ask {c.person} ({c.role}, {c.company} board) how cash, equity, and committee workload compare to expectations—"
+            f"directors care about clarity, not flattery."
+        )
+    if c.has_person and c.has_company:
+        return (
+            f"{c.person} at {c.company} — board roles bring D&O, time, and comp tradeoffs; open with governance questions."
+        )
+    if c.has_company:
+        return f"Board news at {c.company}: verify independent vs. insider status before discussing fees or equity."
+    return "Board appointment—lead with fiduciary duties and schedule, not congratulations."
+
+
+def _bd_1(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company:
+        return (
+            f"Offer {c.person} a concise read on conflicts, equity grants, and personal liability at {c.company}—skip generic prestige talk."
+        )
+    if c.has_company:
+        return f"{c.company}'s board refresh—ask what committees and risk areas the new director will own."
+    return "Director role—neutral: fees, equity, insurance, and time—only what applies once you know their facts."
+
+
+def _bd_2(c: _OutreachCtx) -> str:
+    if c.has_headline:
+        return (
+            f'Use ("{c.headline}") to ask whether the appointment is independent, observer, or executive-linked before tailoring advice.'
+        )
+    if c.has_role:
+        return f"With {c.role} in the story, ask how board duties overlap with operating responsibilities—overlap drives planning."
+    return "Board headline without details—stay curious about role type and time commitment."
+
+
+def _bd_3(c: _OutreachCtx) -> str:
+    if c.has_person:
+        return (
+            f"{c.person} — new boards often trigger personal concentration in one stock; offer diversification framing if appropriate."
+        )
+    if c.has_company:
+        return f"Tie to {c.company}: director comp and equity may differ from management—clarify which hat they wear."
+    return "Governance move—ask what they need from a professional (legal, tax, wealth) before pitching."
+
+
+def _bd_4(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company:
+        return f"Reach out to {c.person} about schedule and reputation risk on {c.company}'s board—not generic 'thrilled for you' copy."
+    return "Board-related item—keep tone professional; ask what they are trying to protect or optimize."
+
+
+def _bd_5(c: _OutreachCtx) -> str:
+    return (
+        "Thin board story—confirm the role, public vs. private issuer, and geography before giving specific wealth guidance."
+    )
+
+
+def _ot_0(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_company:
+        return (
+            f"{c.person} at {c.company} — connect the headline to their professional context; ask what they are prioritizing this quarter."
+        )
+    if c.has_company:
+        return f"Use {c.company} as the anchor and ask what changed operationally or financially—avoid guessing personal details."
+    return "Broad finance or career item—open with curiosity about their goals, not a canned product pitch."
+
+
+def _ot_1(c: _OutreachCtx) -> str:
+    if c.has_headline:
+        return (
+            f'Start from ("{c.headline}") and ask one concrete question about relevance to their work—skip generic congratulations.'
+        )
+    if c.has_person:
+        return f"{c.person} — weak structured data; keep the note short and invite them to share what matters."
+    return "Loose match—acknowledge uncertainty and offer help only where your expertise clearly fits."
+
+
+def _ot_2(c: _OutreachCtx) -> str:
+    if c.has_company:
+        return (
+            f"Sector or company mention ({c.company})—tie planning to public facts; do not invent insider narrative."
+        )
+    return "Other bucket—stay neutral: offer a relevant lens (tax, liquidity, career) and let them correct you."
+
+
+def _ot_3(c: _OutreachCtx) -> str:
+    if c.has_person and c.has_role:
+        co = f" ({c.company})" if c.has_company else ""
+        return f"Ask {c.person}{co} how {c.role} intersects with the headline you saw—verify before advising."
+    if c.has_person:
+        return f"{c.person} — ask what problem they are solving; broad headlines rarely support deep specificity."
+    return "Weak signal—one sentence of context, one question, no assumptions."
+
+
+def _ot_4(c: _OutreachCtx) -> str:
+    return (
+        "Catch-all story—lead with why the item might matter to wealth or career planning, "
+        "and invite them to steer the conversation."
+    )
+
+
+def _ot_5(c: _OutreachCtx) -> str:
+    return (
+        "Noisy classification—prefer a humble check-in: offer perspective if the story touches liquidity, tax, or governance they care about."
+    )
+
+
+_OUTREACH_TEMPLATES: dict[str, list[Callable[[_OutreachCtx], str]]] = {
+    "Founder Exit": [_fe_0, _fe_1, _fe_2, _fe_3, _fe_4, _fe_5],
+    "Funding": [_fu_0, _fu_1, _fu_2, _fu_3, _fu_4, _fu_5],
+    "Promotion": [_pr_0, _pr_1, _pr_2, _pr_3, _pr_4, _pr_5],
+    "Board Appointment": [_bd_0, _bd_1, _bd_2, _bd_3, _bd_4, _bd_5],
+    "Other": [_ot_0, _ot_1, _ot_2, _ot_3, _ot_4, _ot_5],
+}
 
 
 def generate_outreach_angle(row) -> str:
     """
-    Generate context-aware outreach angle based on available fields.
-    Varies by event_type and uses person, company, role when available.
+    One-line outreach angle: varies by event_type and by deterministic template slot.
+
+    Same row content always picks the same template (stable md5 index). Uses person, company,
+    role, and raw headline when present; falls back to neutral copy when data is thin.
     """
-    et = (row["event_type"] or "").strip()
-    person = (row["person_name"] or "").strip()
-    company = (row["company_name"] or "").strip()
-    role = (row["role"] or "").strip()
+    et = (row.get("event_type") or "").strip()
+    if et not in _OUTREACH_TEMPLATES:
+        et = "Other"
 
-    has_person = bool(person)
-    has_company = bool(company) and company != "Unknown"
-    has_role = bool(role)
-
-    if et == "Founder Exit":
-        if has_person and has_company and has_role:
-            return f"Discuss liquidity options with {person}, {role} at {company}, following their recent exit."
-        elif has_person and has_company:
-            return f"Reach out to {person} from {company} about post-exit financial planning."
-        elif has_company:
-            return f"Explore tax strategies for {company}'s recent acquisition or exit."
-        else:
-            return "Discuss founder exit opportunities and wealth management."
-
-    elif et == "Funding":
-        if has_person and has_company and has_role:
-            return f"Connect with {person}, {role} at {company}, on their funding success and future growth."
-        elif has_person and has_company:
-            return f"Congratulate {person} from {company} on the raise and discuss equity planning."
-        elif has_company:
-            return f"Discuss funding implications for {company}'s valuation and team equity."
-        else:
-            return "Explore startup funding strategies and liquidity events."
-
-    elif et == "Promotion":
-        if has_person and has_company and has_role:
-            return f"Reach out to {person} on their {role} promotion at {company}."
-        elif has_person and has_company:
-            return f"Congratulate {person} from {company} on their career advancement."
-        elif has_company:
-            return f"Discuss compensation changes following promotions at {company}."
-        else:
-            return "Talk about career progression and executive compensation."
-
-    elif et == "Board Appointment":
-        if has_person and has_company and has_role:
-            return f"Connect with {person} on their {role} appointment to {company}'s board."
-        elif has_person and has_company:
-            return f"Discuss board opportunities with {person} joining {company}."
-        elif has_company:
-            return f"Explore board compensation and governance at {company}."
-        else:
-            return "Discuss board roles and director compensation."
-
-    else:  # Other or unknown
-        if has_person and has_company:
-            return f"Follow up with {person} from {company} on recent developments."
-        elif has_company:
-            return f"Discuss market updates related to {company}."
-        else:
-            return "Acknowledge the news - offer relevant planning context."
+    c = _OutreachCtx(
+        str(row.get("person_name") or ""),
+        str(row.get("company_name") or ""),
+        str(row.get("role") or ""),
+        str(row.get("raw_title") or ""),
+        et,
+        str(row.get("source_url") or ""),
+    )
+    fns = _OUTREACH_TEMPLATES[et]
+    idx = _stable_template_index(
+        len(fns),
+        c.person,
+        c.company,
+        c.role,
+        c.raw_title,
+        c.event_type,
+        c.source_url,
+    )
+    return fns[idx](c)
 
 
 def priority_level_from_score(score: Any) -> str:
@@ -165,6 +523,40 @@ def suggested_next_step_from_priority(priority_level: str) -> str:
     if p == "Medium":
         return "Add to watchlist"
     return "Monitor for future updates"
+
+
+def compute_extraction_quality(row: pd.Series) -> int:
+    """
+    0-8 extraction strength after normalization (used for hero ranking and filtering).
+
+    Weights person/company/role, prefers core event types over Other, and rewards
+    substantive headlines.
+    """
+    q = 0
+    if str(row.get("person_name", "")).strip():
+        q += 2
+    cn = str(row.get("company_name", "")).strip()
+    if cn and cn != "Unknown":
+        q += 2
+    if str(row.get("role", "")).strip():
+        q += 1
+    if str(row.get("event_type", "")).strip() != "Other":
+        q += 2
+    if len(str(row.get("raw_title", "")).strip()) >= 28:
+        q += 1
+    return q
+
+
+def compute_confidence_score(row: pd.Series) -> int:
+    """
+    0-100: combines extraction quality with signal score for curated top sections.
+
+    Higher quality dominates; score adds a modest bump so High-priority rows surface.
+    """
+    q = int(row.get("quality_score", 0) or 0)
+    s = int(row.get("score", 0) or 0)
+    bump = min(15, max(0, s - 45) // 3)
+    return int(min(100, q * 11 + bump))
 
 
 def why_it_matters_for_event_type(event_type: str) -> str:
@@ -195,7 +587,8 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     - Fills empty why_it_matters using why_it_matters_for_event_type
     - Re-applies scores from score.py (single source of truth)
     - Fills outreach_angle, priority_level, suggested_next_step (action layer)
-    - Drops duplicate source_url rows, keeping the highest score first
+    - Recomputes quality_score (0-8) and confidence_score (0-100) from final fields
+    - Drops duplicate source_url rows, keeping the highest confidence / score first
     """
     if df is None or df.empty:
         out = pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -239,12 +632,18 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("outreach_angle", "priority_level", "suggested_next_step"):
         out[col] = out[col].fillna("").astype(str).str.strip()
 
-    # --- Quality score: ensure it's an int ---
-    out["quality_score"] = out["quality_score"].fillna(0).astype(int)
+    # --- Extraction quality + confidence (single source of truth for hero sections) ---
+    if not out.empty:
+        out["quality_score"] = out.apply(compute_extraction_quality, axis=1).astype(int)
+        out["confidence_score"] = out.apply(compute_confidence_score, axis=1).astype(int)
 
-    # --- Dedupe URLs: keep the row with the highest score, then first occurrence ---
+    # --- Dedupe URLs: keep strongest row per URL ---
     if not out.empty and "source_url" in out.columns:
-        out = out.sort_values(["score", "event_date"], ascending=[False, False], na_position="last")
+        out = out.sort_values(
+            ["confidence_score", "score", "event_date"],
+            ascending=[False, False, False],
+            na_position="last",
+        )
         before = len(out)
         out = out.drop_duplicates(subset=["source_url"], keep="first")
         if before != len(out):
@@ -596,16 +995,6 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
         company = _guess_company_name(title)
         role = _guess_role(title)
 
-        quality_score = 0
-        if person:
-            quality_score += 1
-        if company != "Unknown":
-            quality_score += 1
-        if role:
-            quality_score += 1
-        if event_type != "Other":
-            quality_score += 1
-
         rows.append(
             {
                 "person_name": person,
@@ -618,7 +1007,8 @@ def _rss_items_to_signals(entries: list[Any]) -> list[dict[str, Any]]:
                 "why_it_matters": why_it_matters_for_event_type(event_type),
                 "source_url": link,
                 "full_explanation": full_explanation[:4000],
-                "quality_score": quality_score,
+                "quality_score": 0,
+                "confidence_score": 0,
             }
         )
 
